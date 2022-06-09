@@ -1,0 +1,7 @@
+README.rst
+setup.py
+nsmono/__init__.py
+nsmono.egg-info/PKG-INFO
+nsmono.egg-info/SOURCES.txt
+nsmono.egg-info/dependency_links.txt
+nsmono.egg-info/top_level.txt

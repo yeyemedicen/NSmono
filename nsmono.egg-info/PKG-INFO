@@ -1,0 +1,86 @@
+Metadata-Version: 1.1
+Name: nsmono
+Version: 1.0
+Summary: Navier-Stokes FEM Monolithic solver
+Author: Jeremias Garay
+Author-email: j.e.garay.labra@rug.nl
+License: MIT
+Description: NavierStokes
+
+        Usage
+        =====
+        
+        The mechanical problem is configured in a YAML_ input file.
+        See the collection of documented examples included in the documentation for
+        explanations of the configuration.
+        
+        To run a simulation, execute::
+        
+            python3 run.py <input_file>
+        
+        
+        .. _YAML: https://yaml.org
+        
+        
+        Installation
+        ============
+        
+        Dependencies
+        ------------
+        
+        
+        - Python >= 3.5 
+        - FEniCS_ >= 2019.1.0
+        - Common_ package
+        
+        PyPI Python packages (`pip3 install`)
+          - gitpython
+          - ruamel.yaml
+        
+        To build the documentation:
+        
+        - sphinx, sphinx-argparse (PyPI)
+        
+        .. _FEniCS: https://www.fenicsproject.org
+        .. _dolfin: https://bitbucket.org/fenics-project/dolfin
+        .. _Common: https://gitlab.dim.uchile.cl/biomed/Common
+        
+        
+        Install with pip
+        ----------------
+        
+        Go to the root directory of this module where the file :code:`setup.py` is located
+        and execute in the terminal
+        
+        .. code:: bash
+        
+            pip install [--prefix=<install_path>/--user]
+        
+        or
+        
+        .. code:: bash
+        
+            pip install -e . [--prefix=<install_path>/--user]
+            
+        
+        for an editable development build (no need to reinstall the package after
+        modifications of the source code).
+        
+        .. _docs:
+        
+        Documentation
+        -------------
+        
+        The full documentation can be built with::
+        
+            cd doc && make html
+        
+        and the file :code:`doc/build/html/index.html` viewed with a web browser.
+        
+Platform: UNKNOWN
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python
+Classifier: Topic :: Scientific/Engineering :: Mathematics
