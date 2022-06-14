@@ -9,6 +9,7 @@ from dolfin import *
 from common import inout
 from dolfin import MPI
 from pathlib import Path
+from numpy import poly1d, polyfit, array
 from ..logger.logger import LoggerBase
 from .streamline_diffusion import SDParameter
 from common import inout, utils
@@ -469,20 +470,41 @@ class BoundaryConditions(LoggerBase):
         gamma = bc['gamma']
         uprofile = Function(self.W.sub(0).collapse())
         inout.read_HDF5_data(self.W.mesh().mpi_comm(), bc['profile'], uprofile, 'u')
-        ones = interpolate(Constant(1), self.W.sub(1).collapse()) 
-        area = assemble(ones*ds(nid))
-        Umax = abs(assemble(dot(uprofile,n)*ds(nid))/area)
-        params = bc['parameters']
-        waveform = Expression(bc['waveform'], degree=3, **params)
+        
+        if '.csv' in bc['waveform']:
+            self.logger.info('taking flow form csv file')
+            flow_init = assemble(dot(uprofile,n)*ds(nid))
+            flip = -1 if flow_init >0 else 1
+            Norm_fact = flow_init*flip            
+            time_data = []
+            flow_data = []
+            import csv
+            with open(bc['waveform']) as csv_file:
+                csv_reader = csv.reader(csv_file, delimiter=',')
+                for row in csv_reader:
+                    time_data.append(float(row[0]))
+                    flow_data.append(float(row[1]))
+            
+            flow_func = poly1d(polyfit(time_data,flow_data,18))
+            waveform = Constant(flow_func(0.0))
+        else:
+            ones = interpolate(Constant(1), self.W.sub(1).collapse()) 
+            area = assemble(ones*ds(nid))
+            Norm_fact = abs(assemble(dot(uprofile,n)*ds(nid))/area)
+            params = bc['parameters']
+            waveform = Expression(bc['waveform'], degree=3, **params)
 
         a_lhs = gamma*dot(u, v)*ds(nid)
-        a_rhs = gamma*dot(uprofile*waveform/Umax, v)*ds(nid)
+        a_rhs = gamma*dot(uprofile*waveform/Norm_fact, v)*ds(nid)
 
         self.bc_dict['inflow'][bc['id']] = {
             'lhs': a_lhs,
             'rhs': a_rhs,
             'waveform': waveform,
         }
+
+        if '.csv' in bc['waveform']:
+            self.bc_dict['inflow'][bc['id']].update({'flow_func': flow_func})
 
     def _mapdd(self, bc):
         ''' Create weak form of MAPDD boundary condition '''

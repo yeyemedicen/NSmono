@@ -705,8 +705,13 @@ class Solver(LoggerBase):
                 self.project_enriched_dbc(bc, expr)
         
         for key, dict_ in self.bc_dict['inflow'].items():
-            waveform = self.bc_dict['inflow'][key]['waveform']
-            waveform.t = float(self.t)
+            if 'flow_func' in dict_:
+                flow_func = dict_['flow_func']
+                flow_upd = flow_func(self.t)
+                dict_['waveform'].assign(Constant(flow_upd))
+            else:
+                waveform = self.bc_dict['inflow'][key]['waveform']
+                waveform.t = float(self.t)
 
     def solve_windkessel(self):
         ''' Solve windkessel
