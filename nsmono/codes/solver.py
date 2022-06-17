@@ -1019,7 +1019,7 @@ class PETScSolver(LoggerBase):
             3. solve
             4. clear settings
         '''
-        self.logger.info('KSP: Setting up')
+        self.logger.debug('KSP: Setting up')
         if self.fstype in ('ADD', 'MULT'):
             # or just keep it constant?
             self._assemble_Pmat()
@@ -1032,7 +1032,7 @@ class PETScSolver(LoggerBase):
 
         # self._mg_levels_setup()
 
-        self.logger.info('KSP: Solving Ax=b')
+        self.logger.debug('KSP: Solving Ax=b')
         t0 = Timer('PETScSolver SOLVE ')
         self.ksp.solve(as_backend_type(b).vec(), as_backend_type(x).vec())
         as_backend_type(x).update_ghost_values()
