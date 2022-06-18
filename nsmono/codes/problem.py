@@ -10,6 +10,7 @@ from common import inout
 from dolfin import MPI
 from pathlib import Path
 from numpy import poly1d, polyfit, array
+from scipy.interpolate import interp1d
 from ..logger.logger import LoggerBase
 from .streamline_diffusion import SDParameter
 from common import inout, utils
@@ -485,7 +486,8 @@ class BoundaryConditions(LoggerBase):
                     time_data.append(float(row[0]))
                     flow_data.append(float(row[1]))
             
-            flow_func = poly1d(polyfit(time_data,flow_data,18))
+            #flow_func = poly1d(polyfit(time_data,flow_data,18))
+            flow_func = interp1d(time_data,flow_data, kind='cubic', fill_value='extrapolate')
             waveform = Constant(flow_func(0.0))
         else:
             ones = interpolate(Constant(1), self.W.sub(1).collapse()) 
