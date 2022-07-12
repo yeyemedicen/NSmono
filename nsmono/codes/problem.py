@@ -486,7 +486,6 @@ class BoundaryConditions(LoggerBase):
                     time_data.append(float(row[0]))
                     flow_data.append(float(row[1]))
             
-            #flow_func = poly1d(polyfit(time_data,flow_data,18))
             flow_func = interp1d(time_data,flow_data, kind='cubic', fill_value='extrapolate')
             waveform = Constant(flow_func(0.0))
         else:
