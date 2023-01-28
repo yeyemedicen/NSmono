@@ -55,6 +55,10 @@ class Solver(LoggerBase):
         self.uwrite.rename('u', 'velocity')
         self.pwrite.rename('p', 'pressure')
 
+        self.pi_track = {}
+        for k in self.bc_dict['windkessel'].keys():
+            self.pi_track[k] = []
+
         self.mat = {}
         self.vec = {}
         self.mat.update({
@@ -740,6 +744,9 @@ class Solver(LoggerBase):
 
             pi0 = float(prm['pi0'])
             pi = float(prm['pi'])
+            # tracking pi values
+            self.pi_track[bid].append(pi)
+
             Q0 = float(prm['Q0'])
             pi_upd = alpha*pi0 + beta*Q
             Pl_upd = alpha*pi0 + delta*Q + eta*Q0
@@ -771,8 +778,14 @@ class Solver(LoggerBase):
                                      T=self.options['timemarching']['T'],
                                      width=6))
 
+    def save_tracked_info(self):
+        if self._using_wk:
+            with open(self.options['io']['write_path'] + 'pi_functions.pickle', 'wb') as handle:
+                pickle.dump(self.pi_track, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
     def cleanup(self):
         ''' Cleanup '''
+        self.save_tracked_info()
         self.close_xdmf()
         self.close_logs()
 
