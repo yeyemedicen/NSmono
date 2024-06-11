@@ -10,6 +10,7 @@ from common import inout
 from dolfin import MPI
 from pathlib import Path
 from numpy import poly1d, polyfit, array
+import numpy
 from scipy.interpolate import interp1d
 from ..logger.logger import LoggerBase
 from .streamline_diffusion import SDParameter
@@ -18,6 +19,7 @@ parameters["std_out_all_processes"] = False
 
 
 class Problem(LoggerBase):
+    
     def __init__(self, inputfile=None):
 
         super().__init__()
@@ -47,6 +49,13 @@ class Problem(LoggerBase):
         self.w0 = None
         self.u0 = None
         self.w = None
+        
+        # eigen problem setup
+        self._is_eigenproblem = False
+        if 'eigenproblem' in self.options['fluid']:
+            if self.options['fluid']['eigenproblem']:
+                self._is_eigenproblem = True
+                self.logger.info(' \u2605 \u2605 \u2605  Solving an Stokes Eigen Problem  \u2605 \u2605 \u2605')
 
     def init(self):
         ''' Initialize problem, performing the actions:
@@ -553,13 +562,27 @@ class BoundaryConditions(LoggerBase):
         l = bc['parameters']['l'] if 'l' in bc['parameters'] else 0
         eps = bc['parameters']['eps'] if 'eps' in bc['parameters'] else 0
 
-        if l and not L:
-            print('computing L from l in boundary',bid)
-            rho = float(self.rho)
-            ds = self.ds
+        is_poiseuille_res = False
+        if 'l_poi' in bc['parameters']:
+            if bc['parameters']['l_poi']:
+                is_poiseuille_res = True
+                l_poi = bc['parameters']['l_poi']
+
+
+        if is_poiseuille_res:
             ones = interpolate(Constant(1), self.W.sub(1).collapse()) 
-            area = assemble(ones*ds(bid))
-            L = rho/area*l
+            area = assemble(ones*self.ds(bid))
+            C = 0
+            R_d = 0.5*8*numpy.pi*self.mu*l_poi/area**2
+            R_p = 0.5*8*numpy.pi*self.mu*l_poi/area**2
+        else:
+            if l and not L:
+                print('computing L from l in boundary',bid)
+                rho = float(self.rho)
+                ds = self.ds
+                ones = interpolate(Constant(1), self.W.sub(1).collapse()) 
+                area = assemble(ones*ds(bid))
+                L = rho/area*l
         
 
         alpha = R_d*C/(R_d*C + dt)

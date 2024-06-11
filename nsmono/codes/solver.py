@@ -47,6 +47,8 @@ class Solver(LoggerBase):
         self._optimizing = False
         self._initialized = False
         self.bnds = problem.bnds
+        self._is_eigenproblem = problem._is_eigenproblem
+
         if 'nl_forms' in vars(problem):
             self.nl_forms = problem.nl_forms
 
@@ -55,9 +57,10 @@ class Solver(LoggerBase):
         self.uwrite.rename('u', 'velocity')
         self.pwrite.rename('p', 'pressure')
 
-        self.pi_track = {}
-        for k in self.bc_dict['windkessel'].keys():
-            self.pi_track[k] = []
+        if self._using_wk:
+            self.pi_functions = {}
+            for bid, prm in self.bc_dict['windkessel'].items():
+                self.pi_functions[bid] = []
 
         self.mat = {}
         self.vec = {}
@@ -106,14 +109,17 @@ class Solver(LoggerBase):
     def init_assembly(self):
         ''' Initialize, assemble static matrices. '''
 
-        
-        self.mat['mass'] = assemble(self.forms['mass'])
         self.mat['diff'] = assemble(self.forms['diff'])
-        self.mat['rhs'] = self.mat['mass'].copy()
         self.mat['press'] = assemble(self.forms['press'])
-        # init convection matrix (sparsity pattern) ?
-        #self.mat['conv'] = assemble(self.forms['conv'])
-        self.mat['conv'] = self.mat['mass'].copy()
+
+        if not self._is_eigenproblem:
+            self.mat['mass'] = assemble(self.forms['mass'])
+            self.mat['rhs'] = self.mat['mass'].copy()
+            # init convection matrix (sparsity pattern) ?
+            #self.mat['conv'] = assemble(self.forms['conv'])
+            self.mat['conv'] = self.mat['mass'].copy()
+
+
 
         if self.forms['neumann']:
             self.vec['rhs_const'] = assemble(self.forms['neumann'])
@@ -136,7 +142,12 @@ class Solver(LoggerBase):
     def init_solvers(self):
         self.iterations_ksp = {}
         self.residuals_ksp = {}
-        self.solver_ns  = PETScSolver(self.options, self._logging_filehandler)
+
+        if self._is_eigenproblem:
+            self.solver_ns  = PETScSolver(self.options, self._logging_filehandler, is_eigen=True)
+        else:
+            self.solver_ns  = PETScSolver(self.options, self._logging_filehandler)
+
         self.iterations_ksp.update({'monolithic': []})
         self.residuals_ksp.update({'monolithic': []})
 
@@ -154,17 +165,20 @@ class Solver(LoggerBase):
 
         self.init()
 
-        dt = self.options['timemarching']['dt']
-        T = self.options['timemarching']['T']
-        times = np.arange(self.t + dt, T + dt, dt)
+        if self._is_eigenproblem:
+            self.solve_eigenproblem()
+        else:
+            dt = self.options['timemarching']['dt']
+            T = self.options['timemarching']['T']
+            times = np.arange(self.t + dt, T + dt, dt)
 
-        for i, t in enumerate(times):
-            it = i + 1
-            self.timestep(it, t)
-            self.monitor()
+            for i, t in enumerate(times):
+                it = i + 1
+                self.timestep(it, t)
+                self.monitor()
 
-            if self._diverged:
-                break
+                if self._diverged:
+                    break
 
         self.cleanup()
 
@@ -189,6 +203,25 @@ class Solver(LoggerBase):
         self.assign_parameters(parameters)
 
         self.t = t0
+
+    def solve_eigenproblem(self):
+        if not self._initialized:
+            self.init()
+
+
+        self.logger.info('Solving Eigen Value Problem')
+
+        A = self.assemble_NS(is_eigenproblem = True)
+
+        self.solver_ns.solve(A, None, None)
+        
+        k = self.solver_ns.eigensolver.get_number_converged()
+        w, _, wx, _ = self.solver_ns.eigensolver.get_eigenpair(0)
+        self.logger.info('Largest eigenvalue: {}'.format(w))
+        self.w.vector()[:] = wx
+
+        self.write_xdmf(t=1)
+        self.write_checkpoint(1)
 
     def timestep(self, i=0, t=None, state=None, parameters=None,
                 restart=False, observations=None):
@@ -616,25 +649,35 @@ class Solver(LoggerBase):
             else:
                 raise Exception('Parameter type not recognized')
 
-    def assemble_NS(self):
+    def assemble_NS(self, is_eigenproblem = False):
         ''' Assemble changing matrices '''
         # Note: Matrices are stored into mat['conv'] and mat['rhs']
         # A: system matrix. Assemble convection and add mass/diffusion
 
-        A = self.mat['conv']
-        assemble(self.forms['conv'], tensor=A)
 
-        A.axpy(1, self.mat['mass'], True)
-        A.axpy(1., self.mat['diff'], True)
-        A.axpy(1., self.mat['press'], True)
-        
+        if is_eigenproblem:
+            # assembling eigenproblem matrix
+            A = PETScMatrix()
+            assemble(self.forms['diff'], tensor=A)
+            A.axpy(1., self.mat['press'], True)
 
-        if 'supg_time' in self.forms and self.forms['supg_time']:
-            assemble(self.forms['supg_time'], tensor=self.mat['rhs'])
-            A.axpy(1., self.mat['rhs'], True)
-            self.mat['rhs'].axpy(1., self.mat['mass'], True)
+            [bc.apply(A) for bc in self.bc_dict['dirichlet']]
 
-        [bc.apply(A) for bc in self.bc_dict['dirichlet']]
+        else:
+            A = self.mat['conv']
+            assemble(self.forms['conv'], tensor=A)
+
+            A.axpy(1, self.mat['mass'], True)
+            A.axpy(1., self.mat['diff'], True)
+            A.axpy(1., self.mat['press'], True)
+            
+            if 'supg_time' in self.forms and self.forms['supg_time']:
+                assemble(self.forms['supg_time'], tensor=self.mat['rhs'])
+                A.axpy(1., self.mat['rhs'], True)
+                self.mat['rhs'].axpy(1., self.mat['mass'], True)
+
+            [bc.apply(A) for bc in self.bc_dict['dirichlet']]
+
 
         return A
 
@@ -744,13 +787,11 @@ class Solver(LoggerBase):
 
             pi0 = float(prm['pi0'])
             pi = float(prm['pi'])
-            # tracking pi values
-            self.pi_track[bid].append(pi)
-
             Q0 = float(prm['Q0'])
             pi_upd = alpha*pi0 + beta*Q
             Pl_upd = alpha*pi0 + delta*Q + eta*Q0
             
+            self.pi_functions[bid].append(pi)
             prm['pi0'].assign(Constant(pi))
             prm['Q0'].assign(Constant(Q))
             prm['pi'].assign(Constant(pi_upd))
@@ -778,14 +819,13 @@ class Solver(LoggerBase):
                                      T=self.options['timemarching']['T'],
                                      width=6))
 
-    def save_tracked_info(self):
-        if self._using_wk:
-            with open(self.options['io']['write_path'] + 'pi_functions.pickle', 'wb') as handle:
-                pickle.dump(self.pi_track, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
     def cleanup(self):
         ''' Cleanup '''
-        self.save_tracked_info()
+
+        if self._using_wk:
+            with open(self.options['io']['write_path'] + '/pi_functions.pickle', 'wb') as handle:
+                pickle.dump(self.pi_functions, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
         self.close_xdmf()
         self.close_logs()
 
@@ -933,9 +973,15 @@ class PETScSolver(LoggerBase):
     ''' Solver class that handles preconditioned Krylov solvers
     '''
 
-    def __init__(self, options, logging_fh=None):
+    def __init__(self, options, logging_fh=None, is_eigen = False):
         super().__init__()
+
+        self._is_eigenproblem = is_eigen
+        if self._is_eigenproblem:
+            self.eigensolver = None
+
         self._logging_filehandler = logging_fh
+
         if self._logging_filehandler:
             self.logger.addHandler(self._logging_filehandler)
 
@@ -957,11 +1003,14 @@ class PETScSolver(LoggerBase):
             self.create_ksp()
             self.create_pc()
         else:
-            if not options['linear_solver']['method']:
-                raise Exception('Specify inbuilt solver (lu, mumps) or input '
-                                'file for PETSc!')
-            self.logger.info('using inbuilt linear solver')
-            self.logger.warn('prefer MUMPS via PETSc interface!')
+            if not self._is_eigenproblem:
+                if not options['linear_solver']['method']:
+                    raise Exception('Specify inbuilt solver (lu, mumps) or input '
+                                    'file for PETSc!')
+                self.logger.info('using inbuilt linear solver')
+                self.logger.warn('prefer MUMPS via PETSc interface!')
+            else:
+                self.logger.info('using SLEPc library')
 
     def __del__(self):
         ''' Clean up PETScOptions '''
@@ -1023,7 +1072,13 @@ class PETScSolver(LoggerBase):
         if self._use_petsc():
             self.solve_ksp(A, x, b)
         else:
-            solve(A, x, b, self.options_global['linear_solver']['method'])
+            if self._is_eigenproblem:
+                self.eigensolver = SLEPcEigenSolver(A)
+                self.logger.info('Computing eigenvalues. This could take some time ...')
+                self.eigensolver.solve(20)
+                #self.logger.info('Largest eigenvalue: {}'.format(r))
+            else:
+                solve(A, x, b, self.options_global['linear_solver']['method'])
 
     def solve_ksp(self, A, x, b):
         ''' Solve the system Ax = b.
@@ -1209,8 +1264,11 @@ class PETScSolver(LoggerBase):
             return None
 
     def _use_petsc(self):
-        return ('inputfile' in self.options_global['linear_solver'] and
-                self.options_global['linear_solver']['inputfile'])
+        if self._is_eigenproblem:
+            return False
+        else:
+            return ('inputfile' in self.options_global['linear_solver'] and
+                    self.options_global['linear_solver']['inputfile'])
 
 
 
