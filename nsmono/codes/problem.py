@@ -50,13 +50,21 @@ class Problem(LoggerBase):
         self.u0 = None
         self.w = None
         
+        self.eigen_matrices = None
+
         # eigen problem setup
         self._is_eigenproblem = False
-        if 'eigenproblem' in self.options['fluid']:
-            if self.options['fluid']['eigenproblem']:
-                self._is_eigenproblem = True
-                self.logger.info(' \u2605 \u2605 \u2605  Solving an Stokes Eigen Problem  \u2605 \u2605 \u2605')
+        self._is_eigen_cube = False
 
+        if 'eigenproblem' in self.options['fluid']:
+            if self.options['fluid']['eigenproblem']['apply']:
+                self._is_eigenproblem = True
+                self._is_eigen_cube = self.options['fluid']['eigenproblem']['cube_mesh']
+                self.eigen_matrices = {}
+                self.logger.info(' \u2605 \u2605 \u2605  Solving an Stokes Eigen Problem  \u2605 \u2605 \u2605')
+                if self._is_eigen_cube:
+                    self.logger.info(' \u2605 \u2605 \u2605  Solving in a Unitary Cube mesh  \u2605 \u2605 \u2605')
+                    
     def init(self):
         ''' Initialize problem, performing the actions:
         '''
@@ -64,8 +72,12 @@ class Problem(LoggerBase):
         self.set_constants()
         self.init_mesh()
         self.create_functionspaces()
-        self.boundary_conditions()
-        self.variational_form()
+        if not self._is_eigenproblem:
+            self.boundary_conditions()
+            self.variational_form()
+        else:
+            self.boundary_conditions()
+            self.variational_form_eigen()
 
     def get_parameters(self, inputfile):
         ''' Read parameters from YAML input file into options dictionary
@@ -100,9 +112,59 @@ class Problem(LoggerBase):
     def init_mesh(self):
         ''' Read in mesh, subdomains and boundary information. '''
         self.logger.info('Reading mesh {}'.format(self.options['mesh']))
-        self.mesh, self.subdomains, self.bnds = \
-            inout.read_mesh(self.options['mesh'])
-        self.ndim = self.mesh.topology().dim()
+
+        if self._is_eigenproblem and self._is_eigen_cube:
+            self.mesh = UnitCubeMesh(16, 16, 16)
+            self.subdomains = None
+            self.bnds = []
+            self.ndim = 3
+
+            boundaries  = MeshFunction('size_t', self.mesh, 2)
+            boundaries.set_all(0)
+
+
+            tol = 1E-14
+
+            class S1(SubDomain):
+                def inside(self, x, on_boundary):
+                    return on_boundary and near(x[0], 0, tol)
+            class S2(SubDomain):
+                def inside(self, x, on_boundary):
+                    return on_boundary and near(x[0], 1, tol)
+            class S3(SubDomain):
+                def inside(self, x, on_boundary):
+                    return on_boundary and near(x[1], 0, tol) 
+            class S4(SubDomain):
+                def inside(self, x, on_boundary):
+                    return on_boundary and near(x[1], 1, tol) 
+            class S5(SubDomain):
+                def inside(self, x, on_boundary):
+                    return on_boundary and near(x[2], 0, tol) 
+            class S6(SubDomain):
+                def inside(self, x, on_boundary):
+                    return on_boundary and near(x[2], 1, tol) 
+
+
+            sdomain1 = S1()
+            sdomain1.mark(boundaries, 1)
+            sdomain2 = S2()
+            sdomain2.mark(boundaries, 2)
+            sdomain3 = S3()
+            sdomain3.mark(boundaries, 3)
+            sdomain4 = S4()
+            sdomain4.mark(boundaries, 4)
+            sdomain5 = S5()
+            sdomain5.mark(boundaries, 5)
+            sdomain6 = S6()
+            sdomain6.mark(boundaries, 6)
+            
+            self.bnds = boundaries
+            #XDMFFile('/mnt/c/Users/jerem/OneDrive/Escritorio/bnds.xdmf').write(boundaries)
+
+        else:
+            self.mesh, self.subdomains, self.bnds = \
+                inout.read_mesh(self.options['mesh'])
+            self.ndim = self.mesh.topology().dim()
 
     def create_functionspaces(self):
         r''' Create function spaces for velocity and pressure, namely:
@@ -162,6 +224,12 @@ class Problem(LoggerBase):
         self.w0 = Function(W)
         self.W = W
         self.u0, _ = self.w0.split()
+
+        if self._is_eigenproblem:
+            self.V = VectorFunctionSpace(self.mesh, 'Lagrange', deg)
+            #self.Ve = FunctionSpace(self.mesh, P)
+            #self.Ve = self.W.sub(1).collapse()
+            self.Ve = FunctionSpace(self.mesh, 'Lagrange', 1)
         
     def variational_form(self):
         ''' Set up variational forms of the problem and save in dictionary for
@@ -243,7 +311,6 @@ class Problem(LoggerBase):
                 self.forms['conv'] += const*inner(t_p, t_q)*ds(bid)
                 self.forms['windkessel'] += elem['Pl']*dot(v,n)*ds(bid)
         
-
         forms_stab = self.stabilization(u_conv)
 
         if 'bfs' in forms_stab:
@@ -255,6 +322,69 @@ class Problem(LoggerBase):
             self.forms['conv'] += forms_stab['supg_convdiff']
         if 'supg_time' in forms_stab:
             self.forms.update({'supg_time': forms_stab['supg_time']})
+
+    def variational_form_eigen(self):
+        ''' Set up variational forms of the problem and save in dictionary for
+        later use (reassembly of parts).
+        '''
+
+        self._using_wk = False
+        self._using_mapdd = False
+        if self._is_eigen_cube:
+            self.bc_dict = None
+        self.forms = {}
+        
+        rho = self.rho
+        mu = self.mu
+        k = self.k
+
+        (u, p) = TrialFunctions(self.W)
+        (v, q) = TestFunctions(self.W)
+
+        L_eigen = None
+        a_eigen = None
+
+        #ue = TrialFunction(self.Ve)
+        #ve = TestFunction(self.Ve)
+        #u0 = Function(self.W.sub(0).collapse())
+        #a_eigen = inner(mu*grad(ue), grad(ve))*dx
+        #L_eigen = dot(Constant((1.0, 1.0, 1.0)), ve)*dx
+        #u0f = Function(self.W)
+        #u0, _ = split(u0f)
+
+        #L_eigen = inner(Constant((0.0, 0.0, 0.0)), v)*dx
+        
+        #a_eigen = inner(grad(ue), grad(ve))*dx + inner(ue,ve)*dx
+        #a_eigen = inner(grad(ue), grad(ve))*dx
+        #L_eigen = inner(ue,ve)*dx
+        
+        # stokes
+        #a_eigen = -mu*inner(grad(u), grad(v))*dx + p*div(v)*dx + q*div(u)*dx
+        #L_eigen = inner(u, v)*dx
+            
+
+        ma = inner(u,v)*dx
+        #mp = inner(p,q)*dx
+        #aa = mu*inner(grad(u), grad(v))*dx
+        #grada = div(v)*p*dx
+        #diva = q*div(u)*dx
+        aa_tot = -mu*inner(grad(u), grad(v))*dx + div(v)*p*dx + q*div(u)*dx
+
+        self.eigen_matrices['ma'] = ma
+        self.eigen_matrices['aa_tot'] = aa_tot
+        #self.eigen_matrices['mp'] = mp
+        #self.eigen_matrices['aa'] = aa
+        #self.eigen_matrices['grada'] = grada
+        #self.eigen_matrices['diva'] = diva
+        
+        self.forms.update({'mass': None,
+                        'press': None,
+                        'diff': None,
+                        'conv': None,
+                        'neumann': None,
+                        'eigen': a_eigen,
+                        'eigen_rhs': L_eigen})
+        
 
     def stabilization(self, u_conv=None):
         ''' Call stabilization methods as specified in options dict.
@@ -363,12 +493,15 @@ class Problem(LoggerBase):
     def boundary_conditions(self):
         ''' Create boundary conditions '''
 
-        BC = BoundaryConditions(self)
-        BC.process_bcs()
-        self.bc_dict = BC.bc_dict
-        self.ds = BC.ds
-        self._using_wk = BC._using_wk
-        self._using_mapdd = BC._using_mapdd
+        if self._is_eigen_cube:
+            pass
+        else:
+            BC = BoundaryConditions(self)
+            BC.process_bcs()
+            self.bc_dict = BC.bc_dict
+            self.ds = BC.ds
+            self._using_wk = BC._using_wk
+            self._using_mapdd = BC._using_mapdd
 
 
 class BoundaryConditions(LoggerBase):

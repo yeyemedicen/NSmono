@@ -11,9 +11,14 @@ from petsc4py import PETSc
 from ..logger.logger import LoggerBase
 from pathlib import Path
 import numpy as np
+import sys
 import pickle
 import shutil
 import os
+import scipy.sparse as sps
+import scipy.sparse.linalg as spsla
+from scipy.sparse.linalg import eigsh
+#from matspy import spy
 
 def rank0(func):
     ''' Rank 0 decorator: decorated function "does nothing" if rank > 0 '''
@@ -48,6 +53,13 @@ class Solver(LoggerBase):
         self._initialized = False
         self.bnds = problem.bnds
         self._is_eigenproblem = problem._is_eigenproblem
+        self._is_eigen_cube = problem._is_eigen_cube
+
+        if self._is_eigenproblem:
+            self.W = problem.W
+            #self.V = problem.V
+            #self.Ve = problem.Ve
+            self.eigen_matrices = problem.eigen_matrices
 
         if 'nl_forms' in vars(problem):
             self.nl_forms = problem.nl_forms
@@ -104,20 +116,23 @@ class Solver(LoggerBase):
         self.init_assembly()
         self.init_solvers()
         self._initialized = True
-        self.write_initial_condition()
+        if not self._is_eigenproblem:
+            self.write_initial_condition()
 
     def init_assembly(self):
         ''' Initialize, assemble static matrices. '''
 
-        self.mat['diff'] = assemble(self.forms['diff'])
-        self.mat['press'] = assemble(self.forms['press'])
 
         if not self._is_eigenproblem:
+            self.mat['diff'] = assemble(self.forms['diff'])
+            self.mat['press'] = assemble(self.forms['press'])
             self.mat['mass'] = assemble(self.forms['mass'])
             self.mat['rhs'] = self.mat['mass'].copy()
             # init convection matrix (sparsity pattern) ?
             #self.mat['conv'] = assemble(self.forms['conv'])
             self.mat['conv'] = self.mat['mass'].copy()
+        else:
+            pass
 
 
 
@@ -205,23 +220,143 @@ class Solver(LoggerBase):
         self.t = t0
 
     def solve_eigenproblem(self):
-        if not self._initialized:
-            self.init()
 
+        self.logger.info('Solving the eigenvalue problem...')
 
-        self.logger.info('Solving Eigen Value Problem')
+        nmode = 3
+        nmode_tot = 100
 
-        A = self.assemble_NS(is_eigenproblem = True)
-
-        self.solver_ns.solve(A, None, None)
         
-        k = self.solver_ns.eigensolver.get_number_converged()
-        w, _, wx, _ = self.solver_ns.eigensolver.get_eigenpair(0)
-        self.logger.info('Largest eigenvalue: {}'.format(w))
-        self.w.vector()[:] = wx
+        velbcs = []
 
-        self.write_xdmf(t=1)
-        self.write_checkpoint(1)
+        if self._is_eigen_cube:
+            velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 1))
+            velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 2))
+            velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 3))
+            velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 4))
+            #velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 5))
+            #velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 6))
+        else:
+            for bc in self.bc_dict['dirichlet']:
+                velbcs.append(bc)
+        
+        
+        if len(velbcs) == 0:
+            modifying_matrices = False
+            self.logger.info('Not changing Stokes matrices')
+        else:
+            modifying_matrices = True
+            self.logger.info('Reducing the matrices according to Dirichlet DoFs...')
+
+
+        # according to highlando
+        # Assemble system
+        A_tot = assemble(self.eigen_matrices['aa_tot'])
+        M = assemble(self.eigen_matrices['ma'])
+        #parameters.linear_algebra_backend = "uBLAS"
+        # convert DOLFIN representation to numpy arrays
+        mat = as_backend_type(M).mat()
+        Ma = sps.csr_matrix(mat.getValuesCSR()[::-1], shape=mat.size)
+        mat = as_backend_type(A_tot).mat()
+        Aa_tot = sps.csr_matrix(mat.getValuesCSR()[::-1], shape=mat.size)
+
+
+        num_v = Aa_tot.shape[0]
+        self.logger.info('Size of the system: {}x{}'.format(num_v,num_v))
+
+
+
+
+        if modifying_matrices:
+            auxu = np.zeros((num_v,1))
+            bcinds = []
+
+            for bc in velbcs:
+                bcdict = bc.get_boundary_values()
+                bcdict_lst = list(bcdict.keys())
+                bcdictval_lst = list(bcdict.values())
+                auxu[bcdict_lst,0] = bcdictval_lst
+                bcinds.extend(bcdict.keys())
+
+            bcinds = set(bcinds)
+            bcinds = [c for c in bcinds]
+            invinds = np.setdiff1d(range(num_v),bcinds).astype(np.int32)
+            # extract the inner nodes equation coefficients
+            Mc = Ma[invinds,:][:,invinds]
+            Ac_tot = Aa_tot[invinds,:][:,invinds]
+
+            row_maskA = np.arange(Ac_tot.shape[0] - 1)
+            col_maskA = np.arange(Ac_tot.shape[1] - 1)
+            row_maskM = np.arange(Mc.shape[0] - 1)
+            col_maskM = np.arange(Mc.shape[1] - 1)
+
+            Ac_tot = Ac_tot[row_maskA][:, col_maskA]
+            Mc = Mc[row_maskM][:, col_maskM]
+
+            ValEig = nmode_tot
+            sigmashift = 0 #Garding shift
+            E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM') 
+            ind=np.argsort(E1)[::-1] #Sort descending
+            E1 = E1[ind]
+            V1 = V1[:,ind] #orden de las matrices con los indices de E1 ordenadado
+            sol=np.zeros((num_v,ValEig), dtype=np.float64)
+
+            for k in range(ValEig):
+                sol[invinds[:len(invinds)-1],k] = V1[:,k]
+                
+
+                if k == 0:
+                    self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
+
+
+
+                self.w.vector()[invinds[:len(invinds)-1]] = V1[:,k]   
+                (u, p) = self.w.split()
+                u.rename('u', 'velocity')
+                p.rename('p', 'pressure')
+                
+                self._xdmf_u.write(u, float(k))
+
+            self.logger.info('Done')
+
+            #self.write_xdmf_and_check(uvec = usol, pvec=None , t=nmode)
+
+
+
+        else:
+
+            A_p = PETSc.Mat().createAIJ(size=Aa_tot.shape, csr=(Aa_tot.indptr, Aa_tot.indices, Aa_tot.data))
+            B_p = PETSc.Mat().createAIJ(size=Ma.shape, csr=(Ma.indptr, Ma.indices, Ma.data))
+            AA = PETScMatrix(A_p)
+            BB = PETScMatrix(B_p)
+
+            # solving
+            self.eigensolver = SLEPcEigenSolver(as_backend_type(AA), as_backend_type(BB))
+            #self.eigensolver.parameters["solver"] = "krylov-schur"
+            #self.eigensolver.parameters['spectrum'] = 'smallest magnitude'
+            #self.eigensolver.parameters['spectrum'] = 'smallest real'
+            #self.eigensolver.parameters['tolerance'] = 1.e-14
+            #self.eigensolver.parameters['problem_type'] = 'gen_hermitian'
+            self.eigensolver.parameters['problem_type'] = 'pos_gen_non_hermitian'
+            self.eigensolver.parameters['spectrum'] = 'target magnitude'
+            self.eigensolver.parameters['spectral_transform'] = 'shift-and-invert'
+            self.eigensolver.parameters['spectral_shift'] = sys.float_info.epsilon
+            self.logger.info('Computing eigenvalues. This could take some time ...')
+            self.eigensolver.solve(nmode_tot)
+
+
+            #k = self.solver_ns.eigensolver.get_number_converged()
+            k = self.eigensolver.get_number_converged()
+            print('number of converged solutions: {}'.format(k))
+
+            for i in range(k):
+                if i == nmode:
+                    #w, c, wx, cx = self.solver_ns.eigensolver.get_eigenpair(i)
+                    w, c, wx, cx = self.eigensolver.get_eigenpair(i)
+                    
+                    self.logger.info('{}th eigenvalue: {}'.format(i+1,w))
+                    self.write_xdmf_and_check(uvec = wx, pvec=None , t=i)
+                    #self.write_xdmf_and_check(uvec = None, pvec = wx , t=i)
 
     def timestep(self, i=0, t=None, state=None, parameters=None,
                 restart=False, observations=None):
@@ -656,13 +791,7 @@ class Solver(LoggerBase):
 
 
         if is_eigenproblem:
-            # assembling eigenproblem matrix
-            A = PETScMatrix()
-            assemble(self.forms['diff'], tensor=A)
-            A.axpy(1., self.mat['press'], True)
-
-            [bc.apply(A) for bc in self.bc_dict['dirichlet']]
-
+            pass
         else:
             A = self.mat['conv']
             assemble(self.forms['conv'], tensor=A)
@@ -865,6 +994,76 @@ class Solver(LoggerBase):
                 self.write_checkpoint(i)
 
         self._writeout = writeout
+
+    def write_xdmf_and_check(self, uvec = None, pvec= None, t=None):
+        if not self.options['io']['write_xdmf']:
+            pass
+        else:
+            if not t:
+                t = self.t
+
+            if (not (hasattr(self, '_xdmf_u') or hasattr(self, '_xdmf_p'))
+                    or not (self._xdmf_u or self._xdmf_p)):
+                self._xdmf_u = XDMFFile(self.options['io']['write_path']
+                                        + '/u.xdmf')
+                self._xdmf_p = XDMFFile(self.options['io']['write_path']
+                                        + '/p.xdmf')
+                self._xdmf_u.parameters['rewrite_function_mesh'] = False
+                self._xdmf_u.parameters['functions_share_mesh'] = True
+                self._xdmf_p.parameters['rewrite_function_mesh'] = False
+
+            #u = Function(self.w.function_space().sub(0).collapse())
+            #p = Function(self.w.function_space().sub(1).collapse())
+            #assign(u, self.w.sub(0))
+            #assign(p, self.w.sub(1))
+            
+            (u, p) = self.w.split()
+            u.rename('u', 'velocity')
+            p.rename('p', 'pressure')
+
+            #u = Function(self.V)
+            #u.rename('u', 'velocity')
+            
+            if uvec is not None:
+                u.vector()[:] = uvec
+                self._xdmf_u.write(u, float(t))
+
+            if pvec:
+                pe = Function(self.Ve)
+                pe.rename('lap', 'lap')
+                pe.vector()[:] = pvec
+                self._xdmf_p.write(pe, float(t))
+
+            
+        #if not self.options['io']['write_checkpoints']:
+        if True:
+            pass
+        else:
+            path = (self.options['io']['write_path']
+                    + '/checkpoint/{i}/'.format(i=t))
+
+            comm = self.w.function_space().mesh().mpi_comm()
+            
+            #u = Function(self.w.function_space().sub(0).collapse())
+            #p = Function(self.w.function_space().sub(1).collapse())
+            #assign(u, self.w.sub(0))
+            #assign(p, self.w.sub(1))
+
+            (u, p) = self.w.split()
+
+            u.vector()[:] = uvec
+            if pvec:
+                p.vector()[:] = pvec
+
+            LagrangeInterpolator.interpolate(self.uwrite,u)
+            LagrangeInterpolator.interpolate(self.pwrite,p)
+            
+            #u.rename('u', 'velocity')
+            #p.rename('p', 'pressure')
+
+            inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u',
+                                    t=self.t)
+            inout.write_HDF5_data(comm, path + '/p.h5', self.pwrite, '/p', t=self.t)
 
     def write_xdmf(self, t=None):
         ''' Write solution to XDMF files. If file objects have not been
@@ -1073,10 +1272,14 @@ class PETScSolver(LoggerBase):
             self.solve_ksp(A, x, b)
         else:
             if self._is_eigenproblem:
-                self.eigensolver = SLEPcEigenSolver(A)
-                self.logger.info('Computing eigenvalues. This could take some time ...')
-                self.eigensolver.solve(20)
-                #self.logger.info('Largest eigenvalue: {}'.format(r))
+                pass
+            
+                #self.eigensolver = SLEPcEigenSolver(A)
+                #self.eigensolver.parameters["solver"] = "krylov-schur"
+                #self.eigensolver.parameters["spectrum"] = "smallest magnitude"
+                #self.eigensolver.parameters["spectrum"] = "largest real"
+                #self.logger.info('Computing eigenvalues. This could take some time ...')
+                #self.eigensolver.solve(5)
             else:
                 solve(A, x, b, self.options_global['linear_solver']['method'])
 
