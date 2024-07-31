@@ -55,13 +55,18 @@ class Problem(LoggerBase):
         # eigen problem setup
         self._is_eigenproblem = False
         self._is_eigen_cube = False
+        self._is_laplace_beltrami = False
 
         if 'eigenproblem' in self.options['fluid']:
             if self.options['fluid']['eigenproblem']['apply']:
                 self._is_eigenproblem = True
                 self._is_eigen_cube = self.options['fluid']['eigenproblem']['cube_mesh']
+                self._is_laplace_beltrami = self.options['fluid']['eigenproblem']['laplace-beltrami']
                 self.eigen_matrices = {}
-                self.logger.info(' \u2605 \u2605 \u2605  Solving an Stokes Eigen Problem  \u2605 \u2605 \u2605')
+                if not self._is_laplace_beltrami:
+                    self.logger.info(' \u2605 \u2605 \u2605  Solving an Stokes Eigen Problem  \u2605 \u2605 \u2605')
+                else:
+                    self.logger.info(' \u2605 \u2605 \u2605  Solving a Laplace-Beltrami Eigen Problem  \u2605 \u2605 \u2605')
                 if self._is_eigen_cube:
                     self.logger.info(' \u2605 \u2605 \u2605  Solving in a Unitary Cube mesh  \u2605 \u2605 \u2605')
                     
@@ -334,48 +339,54 @@ class Problem(LoggerBase):
             self.bc_dict = None
         self.forms = {}
         
-        rho = self.rho
         mu = self.mu
-        k = self.k
 
-        (u, p) = TrialFunctions(self.W)
-        (v, q) = TestFunctions(self.W)
+        if self._is_laplace_beltrami:
+            # using laplace-beltrami operator
+            p = TrialFunction(self.Ve)
+            q = TestFunction(self.Ve)
+
+            ma = None
+            aa_tot = inner(grad(p), grad(q))*dx
+
+        else:
+
+            (u, p) = TrialFunctions(self.W)
+            (v, q) = TestFunctions(self.W)
+
+
+            #ue = TrialFunction(self.Ve)
+            #ve = TestFunction(self.Ve)
+            #u0 = Function(self.W.sub(0).collapse())
+            #a_eigen = inner(mu*grad(ue), grad(ve))*dx
+            #L_eigen = dot(Constant((1.0, 1.0, 1.0)), ve)*dx
+            #u0f = Function(self.W)
+            #u0, _ = split(u0f)
+
+            #L_eigen = inner(Constant((0.0, 0.0, 0.0)), v)*dx
+            
+            #a_eigen = inner(grad(ue), grad(ve))*dx + inner(ue,ve)*dx
+            #a_eigen = inner(grad(ue), grad(ve))*dx
+            #L_eigen = inner(ue,ve)*dx
+            
+            # stokes
+            #a_eigen = -mu*inner(grad(u), grad(v))*dx + p*div(v)*dx + q*div(u)*dx
+            #L_eigen = inner(u, v)*dx
+                
+
+            ma = inner(u,v)*dx
+            #mp = inner(p,q)*dx
+            #aa = mu*inner(grad(u), grad(v))*dx
+            #grada = div(v)*p*dx
+            #diva = q*div(u)*dx
+            aa_tot = -mu*inner(grad(u), grad(v))*dx + div(v)*p*dx + q*div(u)*dx
+
 
         L_eigen = None
         a_eigen = None
 
-        #ue = TrialFunction(self.Ve)
-        #ve = TestFunction(self.Ve)
-        #u0 = Function(self.W.sub(0).collapse())
-        #a_eigen = inner(mu*grad(ue), grad(ve))*dx
-        #L_eigen = dot(Constant((1.0, 1.0, 1.0)), ve)*dx
-        #u0f = Function(self.W)
-        #u0, _ = split(u0f)
-
-        #L_eigen = inner(Constant((0.0, 0.0, 0.0)), v)*dx
-        
-        #a_eigen = inner(grad(ue), grad(ve))*dx + inner(ue,ve)*dx
-        #a_eigen = inner(grad(ue), grad(ve))*dx
-        #L_eigen = inner(ue,ve)*dx
-        
-        # stokes
-        #a_eigen = -mu*inner(grad(u), grad(v))*dx + p*div(v)*dx + q*div(u)*dx
-        #L_eigen = inner(u, v)*dx
-            
-
-        ma = inner(u,v)*dx
-        #mp = inner(p,q)*dx
-        #aa = mu*inner(grad(u), grad(v))*dx
-        #grada = div(v)*p*dx
-        #diva = q*div(u)*dx
-        aa_tot = -mu*inner(grad(u), grad(v))*dx + div(v)*p*dx + q*div(u)*dx
-
         self.eigen_matrices['ma'] = ma
         self.eigen_matrices['aa_tot'] = aa_tot
-        #self.eigen_matrices['mp'] = mp
-        #self.eigen_matrices['aa'] = aa
-        #self.eigen_matrices['grada'] = grada
-        #self.eigen_matrices['diva'] = diva
         
         self.forms.update({'mass': None,
                         'press': None,
@@ -385,7 +396,6 @@ class Problem(LoggerBase):
                         'eigen': a_eigen,
                         'eigen_rhs': L_eigen})
         
-
     def stabilization(self, u_conv=None):
         ''' Call stabilization methods as specified in options dict.
 

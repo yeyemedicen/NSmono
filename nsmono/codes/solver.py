@@ -54,11 +54,11 @@ class Solver(LoggerBase):
         self.bnds = problem.bnds
         self._is_eigenproblem = problem._is_eigenproblem
         self._is_eigen_cube = problem._is_eigen_cube
+        self._is_laplace_beltrami = problem._is_laplace_beltrami
 
         if self._is_eigenproblem:
             self.W = problem.W
-            #self.V = problem.V
-            #self.Ve = problem.Ve
+            self.Ve = problem.Ve
             self.eigen_matrices = problem.eigen_matrices
 
         if 'nl_forms' in vars(problem):
@@ -252,111 +252,175 @@ class Solver(LoggerBase):
         # according to highlando
         # Assemble system
         A_tot = assemble(self.eigen_matrices['aa_tot'])
-        M = assemble(self.eigen_matrices['ma'])
-        #parameters.linear_algebra_backend = "uBLAS"
-        # convert DOLFIN representation to numpy arrays
-        mat = as_backend_type(M).mat()
-        Ma = sps.csr_matrix(mat.getValuesCSR()[::-1], shape=mat.size)
+        if self.eigen_matrices['ma']:
+            M = assemble(self.eigen_matrices['ma'])
+            #parameters.linear_algebra_backend = "uBLAS"
+            # convert DOLFIN representation to numpy arrays
+            mat = as_backend_type(M).mat()
+            Ma = sps.csr_matrix(mat.getValuesCSR()[::-1], shape=mat.size)
+
         mat = as_backend_type(A_tot).mat()
         Aa_tot = sps.csr_matrix(mat.getValuesCSR()[::-1], shape=mat.size)
-
-
         num_v = Aa_tot.shape[0]
         self.logger.info('Size of the system: {}x{}'.format(num_v,num_v))
 
 
-
-
-        if modifying_matrices:
-            auxu = np.zeros((num_v,1))
-            bcinds = []
-
-            for bc in velbcs:
-                bcdict = bc.get_boundary_values()
-                bcdict_lst = list(bcdict.keys())
-                bcdictval_lst = list(bcdict.values())
-                auxu[bcdict_lst,0] = bcdictval_lst
-                bcinds.extend(bcdict.keys())
-
-            bcinds = set(bcinds)
-            bcinds = [c for c in bcinds]
-            invinds = np.setdiff1d(range(num_v),bcinds).astype(np.int32)
-            # extract the inner nodes equation coefficients
-            Mc = Ma[invinds,:][:,invinds]
-            Ac_tot = Aa_tot[invinds,:][:,invinds]
-
-            row_maskA = np.arange(Ac_tot.shape[0] - 1)
-            col_maskA = np.arange(Ac_tot.shape[1] - 1)
-            row_maskM = np.arange(Mc.shape[0] - 1)
-            col_maskM = np.arange(Mc.shape[1] - 1)
-
-            Ac_tot = Ac_tot[row_maskA][:, col_maskA]
-            Mc = Mc[row_maskM][:, col_maskM]
-
-            ValEig = nmode_tot
-            sigmashift = 0 #Garding shift
-            E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM') 
-            ind=np.argsort(E1)[::-1] #Sort descending
-            E1 = E1[ind]
-            V1 = V1[:,ind] #orden de las matrices con los indices de E1 ordenadado
-            sol=np.zeros((num_v,ValEig), dtype=np.float64)
-
-            for k in range(ValEig):
-                sol[invinds[:len(invinds)-1],k] = V1[:,k]
+        if self._is_laplace_beltrami:
                 
+                A_p = PETSc.Mat().createAIJ(size=Aa_tot.shape, csr=(Aa_tot.indptr, Aa_tot.indices, Aa_tot.data))
+                AA = PETScMatrix(A_p)
 
-                if k == 0:
-                    self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
-
-
-
-                self.w.vector()[invinds[:len(invinds)-1]] = V1[:,k]   
-                (u, p) = self.w.split()
-                u.rename('u', 'velocity')
-                p.rename('p', 'pressure')
+                # solving
+                self.eigensolver = SLEPcEigenSolver(as_backend_type(AA))
                 
-                self._xdmf_u.write(u, float(k))
+                # random stuff
+                #self.eigensolver.parameters['spectrum'] = 'smallest magnitude' # div
+                self.eigensolver.parameters['spectrum'] = 'smallest real'
+                self.eigensolver.parameters['tolerance'] = 1.e-14
+                self.eigensolver.parameters['problem_type'] = 'gen_hermitian'
+                
+                # settings for neumann
+                #self.eigensolver.parameters['problem_type'] = 'pos_gen_non_hermitian'
+                #self.eigensolver.parameters['spectrum'] = 'target magnitude'
+                #self.eigensolver.parameters['spectral_transform'] = 'shift-and-invert'
+                #self.eigensolver.parameters['spectral_shift'] = sys.float_info.epsilon
+                
+                self.logger.info('Computing eigenvalues. This could take some time ...')
+                self.eigensolver.solve(nmode_tot)
 
-            self.logger.info('Done')
 
-            #self.write_xdmf_and_check(uvec = usol, pvec=None , t=nmode)
+                #k = self.solver_ns.eigensolver.get_number_converged()
+                k = self.eigensolver.get_number_converged()
+                print('number of converged solutions: {}'.format(k))
+
+                uaux = Function(self.Ve)
+                uaux.rename('u', 'velocity')
+
+                for k in range(nmode_tot):
+
+                    if k == 0:
+                        self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
+
+                    w, c, wx, cx = self.eigensolver.get_eigenpair(k)
+                    uaux.vector()[:] = wx
+                    self._xdmf_u.write(uaux, float(k))
+
+
+                    # saving checkpoints
+
+                    path = (self.options['io']['write_path']
+                            + '/checkpoint/{i}/'.format(i=k))
+
+                    comm = self.w.function_space().mesh().mpi_comm()
+
+
+                    (u, p) = self.w.split()
+                    LagrangeInterpolator.interpolate(self.uwrite,u)
+                    LagrangeInterpolator.interpolate(self.pwrite,p)
+                    
+                    inout.write_HDF5_data(comm, path + '/u.h5', uaux, '/u', t=k)
 
 
 
+
+                self.logger.info('Done')
         else:
 
-            A_p = PETSc.Mat().createAIJ(size=Aa_tot.shape, csr=(Aa_tot.indptr, Aa_tot.indices, Aa_tot.data))
-            B_p = PETSc.Mat().createAIJ(size=Ma.shape, csr=(Ma.indptr, Ma.indices, Ma.data))
-            AA = PETScMatrix(A_p)
-            BB = PETScMatrix(B_p)
+            if modifying_matrices:
+                auxu = np.zeros((num_v,1))
+                bcinds = []
 
-            # solving
-            self.eigensolver = SLEPcEigenSolver(as_backend_type(AA), as_backend_type(BB))
-            #self.eigensolver.parameters["solver"] = "krylov-schur"
-            #self.eigensolver.parameters['spectrum'] = 'smallest magnitude'
-            #self.eigensolver.parameters['spectrum'] = 'smallest real'
-            #self.eigensolver.parameters['tolerance'] = 1.e-14
-            #self.eigensolver.parameters['problem_type'] = 'gen_hermitian'
-            self.eigensolver.parameters['problem_type'] = 'pos_gen_non_hermitian'
-            self.eigensolver.parameters['spectrum'] = 'target magnitude'
-            self.eigensolver.parameters['spectral_transform'] = 'shift-and-invert'
-            self.eigensolver.parameters['spectral_shift'] = sys.float_info.epsilon
-            self.logger.info('Computing eigenvalues. This could take some time ...')
-            self.eigensolver.solve(nmode_tot)
+                for bc in velbcs:
+                    bcdict = bc.get_boundary_values()
+                    bcdict_lst = list(bcdict.keys())
+                    bcdictval_lst = list(bcdict.values())
+                    auxu[bcdict_lst,0] = bcdictval_lst
+                    bcinds.extend(bcdict.keys())
 
+                bcinds = set(bcinds)
+                bcinds = [c for c in bcinds]
+                invinds = np.setdiff1d(range(num_v),bcinds).astype(np.int32)
+                # extract the inner nodes equation coefficients
+                Mc = Ma[invinds,:][:,invinds]
+                Ac_tot = Aa_tot[invinds,:][:,invinds]
 
-            #k = self.solver_ns.eigensolver.get_number_converged()
-            k = self.eigensolver.get_number_converged()
-            print('number of converged solutions: {}'.format(k))
+                row_maskA = np.arange(Ac_tot.shape[0] - 1)
+                col_maskA = np.arange(Ac_tot.shape[1] - 1)
+                row_maskM = np.arange(Mc.shape[0] - 1)
+                col_maskM = np.arange(Mc.shape[1] - 1)
 
-            for i in range(k):
-                if i == nmode:
-                    #w, c, wx, cx = self.solver_ns.eigensolver.get_eigenpair(i)
-                    w, c, wx, cx = self.eigensolver.get_eigenpair(i)
+                Ac_tot = Ac_tot[row_maskA][:, col_maskA]
+                Mc = Mc[row_maskM][:, col_maskM]
+
+                ValEig = nmode_tot
+                sigmashift = 0 #Garding shift
+                E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM') 
+                ind=np.argsort(E1)[::-1] #Sort descending
+                E1 = E1[ind]
+                V1 = V1[:,ind] #orden de las matrices con los indices de E1 ordenadado
+                sol=np.zeros((num_v,ValEig), dtype=np.float64)
+
+                for k in range(ValEig):
+                    sol[invinds[:len(invinds)-1],k] = V1[:,k]
                     
-                    self.logger.info('{}th eigenvalue: {}'.format(i+1,w))
-                    self.write_xdmf_and_check(uvec = wx, pvec=None , t=i)
-                    #self.write_xdmf_and_check(uvec = None, pvec = wx , t=i)
+
+                    if k == 0:
+                        self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
+
+                    self.w.vector()[invinds[:len(invinds)-1]] = V1[:,k]   
+                    (u, p) = self.w.split()
+                    u.rename('u', 'velocity')
+                    p.rename('p', 'pressure')
+                    
+                    self._xdmf_u.write(u, float(k))
+
+
+                    # saving checkpoints
+                    path = (self.options['io']['write_path']
+                            + '/checkpoint/{i}/'.format(i=k))
+
+                    comm = self.w.function_space().mesh().mpi_comm()
+                    LagrangeInterpolator.interpolate(self.uwrite,u)
+
+                    inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u', t=k)
+
+
+                self.logger.info('Done')
+
+            else:
+
+                A_p = PETSc.Mat().createAIJ(size=Aa_tot.shape, csr=(Aa_tot.indptr, Aa_tot.indices, Aa_tot.data))
+                B_p = PETSc.Mat().createAIJ(size=Ma.shape, csr=(Ma.indptr, Ma.indices, Ma.data))
+                AA = PETScMatrix(A_p)
+                BB = PETScMatrix(B_p)
+
+                # solving
+                self.eigensolver = SLEPcEigenSolver(as_backend_type(AA), as_backend_type(BB))
+                #self.eigensolver.parameters["solver"] = "krylov-schur"
+                #self.eigensolver.parameters['spectrum'] = 'smallest magnitude'
+                #self.eigensolver.parameters['spectrum'] = 'smallest real'
+                #self.eigensolver.parameters['tolerance'] = 1.e-14
+                #self.eigensolver.parameters['problem_type'] = 'gen_hermitian'
+                self.eigensolver.parameters['problem_type'] = 'pos_gen_non_hermitian'
+                self.eigensolver.parameters['spectrum'] = 'target magnitude'
+                self.eigensolver.parameters['spectral_transform'] = 'shift-and-invert'
+                self.eigensolver.parameters['spectral_shift'] = sys.float_info.epsilon
+                self.logger.info('Computing eigenvalues. This could take some time ...')
+                self.eigensolver.solve(nmode_tot)
+
+
+                #k = self.solver_ns.eigensolver.get_number_converged()
+                k = self.eigensolver.get_number_converged()
+                print('number of converged solutions: {}'.format(k))
+
+                for i in range(k):
+                    if i == nmode:
+                        #w, c, wx, cx = self.solver_ns.eigensolver.get_eigenpair(i)
+                        w, c, wx, cx = self.eigensolver.get_eigenpair(i)
+                        
+                        self.logger.info('{}th eigenvalue: {}'.format(i+1,w))
+                        self.write_xdmf_and_check(uvec = wx, pvec=None , t=i)
+                        #self.write_xdmf_and_check(uvec = None, pvec = wx , t=i)
 
     def timestep(self, i=0, t=None, state=None, parameters=None,
                 restart=False, observations=None):
