@@ -303,20 +303,16 @@ class Solver(LoggerBase):
 
                     w, c, wx, cx = self.eigensolver.get_eigenpair(k)
                     uaux.vector()[:] = wx
+
+                    # normalizing vector
+                    u_norm = norm(uaux)
+                    uaux.vector()[:] = uaux.vector()[:]/u_norm
+
                     self._xdmf_u.write(uaux, float(k))
 
-
                     # saving checkpoints
-
-                    path = (self.options['io']['write_path']
-                            + '/checkpoint/{i}/'.format(i=k))
-
+                    path = (self.options['io']['write_path'] + '/checkpoint/{i}/'.format(i=k))
                     comm = self.w.function_space().mesh().mpi_comm()
-
-
-                    (u, p) = self.w.split()
-                    LagrangeInterpolator.interpolate(self.uwrite,u)
-                    LagrangeInterpolator.interpolate(self.pwrite,p)
                     
                     inout.write_HDF5_data(comm, path + '/u.h5', uaux, '/u', t=k)
 
