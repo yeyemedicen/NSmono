@@ -262,6 +262,7 @@ class Solver(LoggerBase):
         mat = as_backend_type(A_tot).mat()
         Aa_tot = sps.csr_matrix(mat.getValuesCSR()[::-1], shape=mat.size)
         num_v = Aa_tot.shape[0]
+        frecuencies = []
         self.logger.info('Size of the system: {}x{}'.format(num_v,num_v))
 
 
@@ -271,10 +272,13 @@ class Solver(LoggerBase):
                 AA = PETScMatrix(A_p)
 
                 # solving
-                self.eigensolver = SLEPcEigenSolver(as_backend_type(AA))
+                #self.eigensolver = SLEPcEigenSolver(as_backend_type(AA))
+                self.eigensolver = SLEPcEigenSolver(AA)
                 
+
                 # random stuff
                 #self.eigensolver.parameters['spectrum'] = 'smallest magnitude' # div
+                
                 self.eigensolver.parameters['spectrum'] = 'smallest real'
                 self.eigensolver.parameters['tolerance'] = 1.e-14
                 self.eigensolver.parameters['problem_type'] = 'gen_hermitian'
@@ -297,31 +301,24 @@ class Solver(LoggerBase):
                 uaux.rename('u', 'velocity')
 
                 for k in range(nmode_tot):
-
                     if k == 0:
                         self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
-
                     w, c, wx, cx = self.eigensolver.get_eigenpair(k)
+                    frecuencies.append(w)
                     uaux.vector()[:] = wx
-
                     # normalizing vector
                     u_norm = norm(uaux)
                     uaux.vector()[:] = uaux.vector()[:]/u_norm
-
                     self._xdmf_u.write(uaux, float(k))
-
                     # saving checkpoints
                     path = (self.options['io']['write_path'] + '/checkpoint/{i}/'.format(i=k))
                     comm = self.w.function_space().mesh().mpi_comm()
-                    
                     inout.write_HDF5_data(comm, path + '/u.h5', uaux, '/u', t=k)
 
-
-
-
+                # saving the frecuencies
+                np.savetxt(self.options['io']['write_path'] + '/eigenvalues.txt', frecuencies)
                 self.logger.info('Done')
         else:
-
             if modifying_matrices:
                 auxu = np.zeros((num_v,1))
                 bcinds = []
@@ -355,29 +352,22 @@ class Solver(LoggerBase):
                 E1 = E1[ind]
                 V1 = V1[:,ind] #orden de las matrices con los indices de E1 ordenadado
                 sol=np.zeros((num_v,ValEig), dtype=np.float64)
+                np.savetxt(self.options['io']['write_path'] + '/eigenvalues.txt', E1)
 
                 for k in range(ValEig):
                     sol[invinds[:len(invinds)-1],k] = V1[:,k]
-                    
-
                     if k == 0:
                         self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
-
                     self.w.vector()[invinds[:len(invinds)-1]] = V1[:,k]   
                     (u, p) = self.w.split()
                     u.rename('u', 'velocity')
                     p.rename('p', 'pressure')
-                    
                     self._xdmf_u.write(u, float(k))
-
-
                     # saving checkpoints
                     path = (self.options['io']['write_path']
                             + '/checkpoint/{i}/'.format(i=k))
-
                     comm = self.w.function_space().mesh().mpi_comm()
                     LagrangeInterpolator.interpolate(self.uwrite,u)
-
                     inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u', t=k)
 
 
