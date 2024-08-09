@@ -237,8 +237,11 @@ class Solver(LoggerBase):
             #velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 5))
             #velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 6))
         else:
-            for bc in self.bc_dict['dirichlet']:
-                velbcs.append(bc)
+            if self._is_laplace_beltrami:
+                velbcs.append(DirichletBC(self.Ve, Constant(0.0), self.bnds, 1))
+            else:
+                for bc in self.bc_dict['dirichlet']:
+                    velbcs.append(bc)
         
         
         if len(velbcs) == 0:
@@ -252,6 +255,7 @@ class Solver(LoggerBase):
         # according to highlando
         # Assemble system
         A_tot = assemble(self.eigen_matrices['aa_tot'])
+        
         if self.eigen_matrices['ma']:
             M = assemble(self.eigen_matrices['ma'])
             #parameters.linear_algebra_backend = "uBLAS"
@@ -266,37 +270,30 @@ class Solver(LoggerBase):
         self.logger.info('Size of the system: {}x{}'.format(num_v,num_v))
 
 
-        if self._is_laplace_beltrami:
-                
+        #if self._is_laplace_beltrami:
+        if False:
                 A_p = PETSc.Mat().createAIJ(size=Aa_tot.shape, csr=(Aa_tot.indptr, Aa_tot.indices, Aa_tot.data))
                 AA = PETScMatrix(A_p)
 
                 # solving
                 #self.eigensolver = SLEPcEigenSolver(as_backend_type(AA))
-                self.eigensolver = SLEPcEigenSolver(AA)
+                self.eigensolver = SLEPcEigenSolver(as_backend_type(A_tot))
                 
-
                 # random stuff
                 #self.eigensolver.parameters['spectrum'] = 'smallest magnitude' # div
-                
                 self.eigensolver.parameters['spectrum'] = 'smallest real'
                 self.eigensolver.parameters['tolerance'] = 1.e-14
                 self.eigensolver.parameters['problem_type'] = 'gen_hermitian'
-                
                 # settings for neumann
                 #self.eigensolver.parameters['problem_type'] = 'pos_gen_non_hermitian'
                 #self.eigensolver.parameters['spectrum'] = 'target magnitude'
                 #self.eigensolver.parameters['spectral_transform'] = 'shift-and-invert'
                 #self.eigensolver.parameters['spectral_shift'] = sys.float_info.epsilon
-                
                 self.logger.info('Computing eigenvalues. This could take some time ...')
                 self.eigensolver.solve(nmode_tot)
-
-
                 #k = self.solver_ns.eigensolver.get_number_converged()
                 k = self.eigensolver.get_number_converged()
                 print('number of converged solutions: {}'.format(k))
-
                 uaux = Function(self.Ve)
                 uaux.rename('u', 'velocity')
 
@@ -320,6 +317,7 @@ class Solver(LoggerBase):
                 self.logger.info('Done')
         else:
             if modifying_matrices:
+
                 auxu = np.zeros((num_v,1))
                 bcinds = []
 
@@ -336,39 +334,51 @@ class Solver(LoggerBase):
                 # extract the inner nodes equation coefficients
                 Mc = Ma[invinds,:][:,invinds]
                 Ac_tot = Aa_tot[invinds,:][:,invinds]
-
                 row_maskA = np.arange(Ac_tot.shape[0] - 1)
                 col_maskA = np.arange(Ac_tot.shape[1] - 1)
                 row_maskM = np.arange(Mc.shape[0] - 1)
                 col_maskM = np.arange(Mc.shape[1] - 1)
-
                 Ac_tot = Ac_tot[row_maskA][:, col_maskA]
                 Mc = Mc[row_maskM][:, col_maskM]
-
                 ValEig = nmode_tot
                 sigmashift = 0 #Garding shift
-                E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM') 
+                E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM')
                 ind=np.argsort(E1)[::-1] #Sort descending
+                ind = ind=np.argsort(E1)
                 E1 = E1[ind]
                 V1 = V1[:,ind] #orden de las matrices con los indices de E1 ordenadado
                 sol=np.zeros((num_v,ValEig), dtype=np.float64)
                 np.savetxt(self.options['io']['write_path'] + '/eigenvalues.txt', E1)
 
+                if self._is_laplace_beltrami:
+                    uaux = Function(self.Ve)
+                    uaux.rename('u', 'velocity')
+
+
                 for k in range(ValEig):
                     sol[invinds[:len(invinds)-1],k] = V1[:,k]
                     if k == 0:
                         self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
-                    self.w.vector()[invinds[:len(invinds)-1]] = V1[:,k]   
-                    (u, p) = self.w.split()
-                    u.rename('u', 'velocity')
-                    p.rename('p', 'pressure')
-                    self._xdmf_u.write(u, float(k))
+
                     # saving checkpoints
                     path = (self.options['io']['write_path']
                             + '/checkpoint/{i}/'.format(i=k))
                     comm = self.w.function_space().mesh().mpi_comm()
-                    LagrangeInterpolator.interpolate(self.uwrite,u)
-                    inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u', t=k)
+
+
+                    if self._is_laplace_beltrami:
+                        uaux.vector()[invinds[:len(invinds)-1]] = V1[:,k]
+                        self._xdmf_u.write(uaux, float(k))
+                        inout.write_HDF5_data(comm, path + '/u.h5', uaux, '/u', t=k)
+                        
+                    else:
+                        self.w.vector()[invinds[:len(invinds)-1]] = V1[:,k]   
+                        (u, p) = self.w.split()
+                        u.rename('u', 'velocity')
+                        p.rename('p', 'pressure')
+                        LagrangeInterpolator.interpolate(self.uwrite,u)
+                        self._xdmf_u.write(u, float(k))
+                        inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u', t=k)
 
 
                 self.logger.info('Done')

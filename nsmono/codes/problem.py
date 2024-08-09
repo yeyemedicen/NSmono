@@ -234,7 +234,7 @@ class Problem(LoggerBase):
             self.V = VectorFunctionSpace(self.mesh, 'Lagrange', deg)
             #self.Ve = FunctionSpace(self.mesh, P)
             #self.Ve = self.W.sub(1).collapse()
-            self.Ve = FunctionSpace(self.mesh, 'Lagrange', 1)
+            self.Ve = FunctionSpace(self.mesh, 'Lagrange', 2)
         
     def variational_form(self):
         ''' Set up variational forms of the problem and save in dictionary for
@@ -346,7 +346,7 @@ class Problem(LoggerBase):
             p = TrialFunction(self.Ve)
             q = TestFunction(self.Ve)
 
-            ma = None
+            ma = inner(p,q)*dx
             aa_tot = inner(grad(p), grad(q))*dx
 
         else:
