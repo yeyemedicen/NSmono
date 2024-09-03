@@ -317,7 +317,6 @@ class Solver(LoggerBase):
                 self.logger.info('Done')
         else:
             if modifying_matrices:
-
                 auxu = np.zeros((num_v,1))
                 bcinds = []
 
