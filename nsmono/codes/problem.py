@@ -55,18 +55,18 @@ class Problem(LoggerBase):
         # eigen problem setup
         self._is_eigenproblem = False
         self._is_eigen_cube = False
-        self._is_laplace_beltrami = False
+        self._is_laplace = False
 
         if 'eigenproblem' in self.options['fluid']:
             if self.options['fluid']['eigenproblem']['apply']:
                 self._is_eigenproblem = True
                 self._is_eigen_cube = self.options['fluid']['eigenproblem']['cube_mesh']
-                self._is_laplace_beltrami = self.options['fluid']['eigenproblem']['laplace-beltrami']
+                self._is_laplace = self.options['fluid']['eigenproblem']['laplace']
                 self.eigen_matrices = {}
-                if not self._is_laplace_beltrami:
+                if not self._is_laplace:
                     self.logger.info(' \u2605 \u2605 \u2605  Solving an Stokes Eigen Problem  \u2605 \u2605 \u2605')
                 else:
-                    self.logger.info(' \u2605 \u2605 \u2605  Solving a Laplace-Beltrami Eigen Problem  \u2605 \u2605 \u2605')
+                    self.logger.info(' \u2605 \u2605 \u2605  Solving a Laplace Eigen Problem  \u2605 \u2605 \u2605')
                 if self._is_eigen_cube:
                     self.logger.info(' \u2605 \u2605 \u2605  Solving in a Unitary Cube mesh  \u2605 \u2605 \u2605')
                     
@@ -341,8 +341,8 @@ class Problem(LoggerBase):
         
         mu = self.mu
 
-        if self._is_laplace_beltrami:
-            # using laplace-beltrami operator
+        if self._is_laplace:
+            # using laplace operator
             p = TrialFunction(self.Ve)
             q = TestFunction(self.Ve)
 
@@ -350,10 +350,8 @@ class Problem(LoggerBase):
             aa_tot = inner(grad(p), grad(q))*dx
 
         else:
-
             (u, p) = TrialFunctions(self.W)
             (v, q) = TestFunctions(self.W)
-
 
             #ue = TrialFunction(self.Ve)
             #ve = TestFunction(self.Ve)
@@ -628,6 +626,9 @@ class BoundaryConditions(LoggerBase):
             self.logger.info('taking flow form csv file')
             flow_init = assemble(dot(uprofile,n)*ds(nid))
             flip = -1 if flow_init >0 else 1
+            factor = 1.0
+            if 'factor' in bc:
+                factor = bc['factor']
             Norm_fact = flow_init*flip            
             time_data = []
             flow_data = []
@@ -636,7 +637,7 @@ class BoundaryConditions(LoggerBase):
                 csv_reader = csv.reader(csv_file, delimiter=',')
                 for row in csv_reader:
                     time_data.append(float(row[0]))
-                    flow_data.append(float(row[1]))
+                    flow_data.append(factor*float(row[1]))
             
             flow_func = interp1d(time_data,flow_data, kind='cubic', fill_value='extrapolate')
             waveform = Constant(flow_func(0.0))

@@ -54,7 +54,7 @@ class Solver(LoggerBase):
         self.bnds = problem.bnds
         self._is_eigenproblem = problem._is_eigenproblem
         self._is_eigen_cube = problem._is_eigen_cube
-        self._is_laplace_beltrami = problem._is_laplace_beltrami
+        self._is_laplace = problem._is_laplace
 
         if self._is_eigenproblem:
             self.W = problem.W
@@ -64,8 +64,14 @@ class Solver(LoggerBase):
         if 'nl_forms' in vars(problem):
             self.nl_forms = problem.nl_forms
 
-        self.uwrite = Function(self.w.function_space().sub(0).collapse())
-        self.pwrite = Function(self.w.function_space().sub(1).collapse())
+        mesh = self.w.function_space().mesh()
+        V = VectorFunctionSpace(mesh, 'P', 1)
+        Q = FunctionSpace(mesh, 'P', 1)
+        
+        #self.uwrite = Function(self.w.function_space().sub(0).collapse())
+        #self.pwrite = Function(self.w.function_space().sub(1).collapse())
+        self.uwrite = Function(V)
+        self.pwrite = Function(Q)
         self.uwrite.rename('u', 'velocity')
         self.pwrite.rename('p', 'pressure')
 
@@ -237,7 +243,7 @@ class Solver(LoggerBase):
             #velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 5))
             #velbcs.append(DirichletBC(self.W.sub(0), Constant((0.0,0.0,0.0)), self.bnds, 6))
         else:
-            if self._is_laplace_beltrami:
+            if self._is_laplace:
                 velbcs.append(DirichletBC(self.Ve, Constant(0.0), self.bnds, 1))
             else:
                 for bc in self.bc_dict['dirichlet']:
@@ -270,7 +276,7 @@ class Solver(LoggerBase):
         self.logger.info('Size of the system: {}x{}'.format(num_v,num_v))
 
 
-        #if self._is_laplace_beltrami:
+        #if self._is_laplace:
         if False:
                 A_p = PETSc.Mat().createAIJ(size=Aa_tot.shape, csr=(Aa_tot.indptr, Aa_tot.indices, Aa_tot.data))
                 AA = PETScMatrix(A_p)
@@ -348,8 +354,8 @@ class Solver(LoggerBase):
                 V1 = V1[:,ind] #orden de las matrices con los indices de E1 ordenadado
                 sol=np.zeros((num_v,ValEig), dtype=np.float64)
                 np.savetxt(self.options['io']['write_path'] + '/eigenvalues.txt', E1)
-
-                if self._is_laplace_beltrami:
+                
+                if self._is_laplace:
                     uaux = Function(self.Ve)
                     uaux.rename('u', 'velocity')
 
@@ -358,6 +364,8 @@ class Solver(LoggerBase):
                     sol[invinds[:len(invinds)-1],k] = V1[:,k]
                     if k == 0:
                         self._xdmf_u = XDMFFile(self.options['io']['write_path'] + '/u.xdmf')
+                        self._xdmf_p = XDMFFile(self.options['io']['write_path'] + '/p.xdmf')
+                        
 
                     # saving checkpoints
                     path = (self.options['io']['write_path']
@@ -365,7 +373,7 @@ class Solver(LoggerBase):
                     comm = self.w.function_space().mesh().mpi_comm()
 
 
-                    if self._is_laplace_beltrami:
+                    if self._is_laplace:
                         uaux.vector()[invinds[:len(invinds)-1]] = V1[:,k]
                         self._xdmf_u.write(uaux, float(k))
                         inout.write_HDF5_data(comm, path + '/u.h5', uaux, '/u', t=k)
@@ -376,8 +384,14 @@ class Solver(LoggerBase):
                         u.rename('u', 'velocity')
                         p.rename('p', 'pressure')
                         LagrangeInterpolator.interpolate(self.uwrite,u)
+                        LagrangeInterpolator.interpolate(self.pwrite,p)
+                        
                         self._xdmf_u.write(u, float(k))
+                        self._xdmf_p.write(p, float(k))
+                        
                         inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u', t=k)
+                        inout.write_HDF5_data(comm, path + '/p.h5', self.pwrite, '/p', t=k)
+                        
 
 
                 self.logger.info('Done')
@@ -1175,21 +1189,26 @@ class Solver(LoggerBase):
 
         comm = self.w.function_space().mesh().mpi_comm()
         
-        #u = Function(self.w.function_space().sub(0).collapse())
-        #p = Function(self.w.function_space().sub(1).collapse())
+
+        #uwrite = Function(self.w.function_space().sub(0).collapse())
+        #pwrite = Function(self.w.function_space().sub(1).collapse())
         #assign(u, self.w.sub(0))
         #assign(p, self.w.sub(1))
+        #assign(self.uwrite, self.w.sub(0))
+        #assign(self.pwrite, self.w.sub(1))
+
 
         (u, p) = self.w.split()
+        #u, p = self.w.split()
+        
+        #assign(self.uwrite, u)
+        #assign(self.pwrite, p)
         LagrangeInterpolator.interpolate(self.uwrite,u)
         LagrangeInterpolator.interpolate(self.pwrite,p)
-        
-        #u.rename('u', 'velocity')
-        #p.rename('p', 'pressure')
 
-        inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u',
-                                t=self.t)
+        inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u',t=self.t)
         inout.write_HDF5_data(comm, path + '/p.h5', self.pwrite, '/p', t=self.t)
+
 
     def close_xdmf(self) -> None:
         ''' close XDMF Files '''
