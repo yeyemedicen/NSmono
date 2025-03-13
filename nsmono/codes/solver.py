@@ -65,13 +65,16 @@ class Solver(LoggerBase):
             self.nl_forms = problem.nl_forms
 
         mesh = self.w.function_space().mesh()
+        
         V = VectorFunctionSpace(mesh, 'P', 1)
         Q = FunctionSpace(mesh, 'P', 1)
         
         #self.uwrite = Function(self.w.function_space().sub(0).collapse())
         #self.pwrite = Function(self.w.function_space().sub(1).collapse())
+        # for use solution as ref interpolation
         self.uwrite = Function(V)
         self.pwrite = Function(Q)
+        
         self.uwrite.rename('u', 'velocity')
         self.pwrite.rename('p', 'pressure')
 
@@ -230,7 +233,7 @@ class Solver(LoggerBase):
         self.logger.info('Solving the eigenvalue problem...')
 
         nmode = 3
-        nmode_tot = 100
+        nmode_tot = 25
 
         
         velbcs = []
