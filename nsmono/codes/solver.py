@@ -66,9 +66,12 @@ class Solver(LoggerBase):
 
         mesh = self.w.function_space().mesh()
         
-        V = VectorFunctionSpace(mesh, 'P', 1)
+        u_space = self.options['fem']['velocity_space'].lower()
+        deg = int(u_space[1])
+        V = VectorFunctionSpace(mesh, 'P', deg)
         Q = FunctionSpace(mesh, 'P', 1)
         
+        # for stokes-like solutions and stokes eigen values
         #self.uwrite = Function(self.w.function_space().sub(0).collapse())
         #self.pwrite = Function(self.w.function_space().sub(1).collapse())
         # for use solution as ref interpolation
@@ -233,7 +236,7 @@ class Solver(LoggerBase):
         self.logger.info('Solving the eigenvalue problem...')
 
         nmode = 3
-        nmode_tot = 25
+        nmode_tot = 40
 
         
         velbcs = []
