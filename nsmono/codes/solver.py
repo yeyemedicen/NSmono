@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import sys
 import pickle
+import time
 import shutil
 import os
 import scipy.sparse as sps
@@ -55,6 +56,7 @@ class Solver(LoggerBase):
         self._is_eigenproblem = problem._is_eigenproblem
         self._is_eigen_cube = problem._is_eigen_cube
         self._is_laplace = problem._is_laplace
+        self.is_wk_implicit = problem.is_wk_implicit
 
         if self._is_eigenproblem:
             self.W = problem.W
@@ -66,17 +68,17 @@ class Solver(LoggerBase):
 
         mesh = self.w.function_space().mesh()
         
-        u_space = self.options['fem']['velocity_space'].lower()
-        deg = int(u_space[1])
-        V = VectorFunctionSpace(mesh, 'P', deg)
-        Q = FunctionSpace(mesh, 'P', 1)
-        
+
         # for stokes-like solutions and stokes eigen values
-        #self.uwrite = Function(self.w.function_space().sub(0).collapse())
-        #self.pwrite = Function(self.w.function_space().sub(1).collapse())
+        self.uwrite = Function(self.w.function_space().sub(0).collapse())
+        self.pwrite = Function(self.w.function_space().sub(1).collapse())
         # for use solution as ref interpolation
-        self.uwrite = Function(V)
-        self.pwrite = Function(Q)
+        #u_space = self.options['fem']['velocity_space'].lower()
+        #deg = int(u_space[1])
+        #V = VectorFunctionSpace(mesh, 'P', deg)
+        #Q = FunctionSpace(mesh, 'P', 1)
+        #self.uwrite = Function(V)
+        #self.pwrite = Function(Q)
         
         self.uwrite.rename('u', 'velocity')
         self.pwrite.rename('p', 'pressure')
@@ -198,6 +200,8 @@ class Solver(LoggerBase):
             dt = self.options['timemarching']['dt']
             T = self.options['timemarching']['T']
             times = np.arange(self.t + dt, T + dt, dt)
+            
+            tic = time.time()
 
             for i, t in enumerate(times):
                 it = i + 1
@@ -206,6 +210,14 @@ class Solver(LoggerBase):
 
                 if self._diverged:
                     break
+
+                if i == 0:
+                    toc = time.time()
+                    elapseTime = len(times)*(toc - tic)
+                    elapseTime_hr = int(elapseTime//3600)
+                    elapseTime_min = int((elapseTime - elapseTime_hr*3600)//60)
+                    elapseTime_sec = int(elapseTime - elapseTime_hr*3600 - elapseTime_min*60)
+                    self.logger.info("estimated time: {} hr, {} min, {} sec".format(elapseTime_hr, elapseTime_min, elapseTime_sec))
 
         self.cleanup()
 
@@ -957,7 +969,7 @@ class Solver(LoggerBase):
             expr = dict_['expression']
             if 't' in expr.user_parameters:
                 expr.t = float(self.t)
-                self.project_enriched_dbc(bc, expr)
+                #self.project_enriched_dbc(bc, expr)
         
         for key, dict_ in self.bc_dict['inflow'].items():
             if 'flow_func' in dict_:
@@ -991,19 +1003,34 @@ class Solver(LoggerBase):
             delta = gamma + L/dt
             eta = -L/dt
 
-            Q = assemble(dot(self.u0,n)*ds(bid))
+            if self.is_wk_implicit:
+                #Q = assemble(dot(self.w.sub(0),n)*ds(bid))
+                Q0 = assemble(dot(self.u0,n)*ds(bid))
 
-            pi0 = float(prm['pi0'])
-            pi = float(prm['pi'])
-            Q0 = float(prm['Q0'])
-            pi_upd = alpha*pi0 + beta*Q
-            Pl_upd = alpha*pi0 + delta*Q + eta*Q0
-            
-            self.pi_functions[bid].append(pi)
-            prm['pi0'].assign(Constant(pi))
-            prm['Q0'].assign(Constant(Q))
-            prm['pi'].assign(Constant(pi_upd))
-            prm['Pl'].assign(Constant(Pl_upd))
+                pi0 = float(prm['pi0'])
+                pi = float(prm['pi'])
+                Q0 = float(prm['Q0'])
+                pi_upd = alpha*pi0 #+ beta*Q
+                Pl_upd = alpha*pi0 + eta*Q0
+
+                self.pi_functions[bid].append(pi)
+                prm['pi0'].assign(Constant(pi))
+                prm['Q0'].assign(Constant(Q0))
+                prm['pi'].assign(Constant(pi_upd))
+                prm['Pl'].assign(Constant(Pl_upd))
+
+            else:
+                Q = assemble(dot(self.u0,n)*ds(bid))
+                pi0 = float(prm['pi0'])
+                pi = float(prm['pi'])
+                Q0 = float(prm['Q0'])
+                pi_upd = alpha*pi0 + beta*Q
+                Pl_upd = alpha*pi0 + delta*Q + eta*Q0
+                self.pi_functions[bid].append(pi)
+                prm['pi0'].assign(Constant(pi))
+                prm['Q0'].assign(Constant(Q))
+                prm['pi'].assign(Constant(pi_upd))
+                prm['Pl'].assign(Constant(Pl_upd))
 
     def project_enriched_dbc(self, bc, expr):
         if utils.is_enriched(bc.function_space()):
@@ -1214,7 +1241,6 @@ class Solver(LoggerBase):
 
         inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u',t=self.t)
         inout.write_HDF5_data(comm, path + '/p.h5', self.pwrite, '/p', t=self.t)
-
 
     def close_xdmf(self) -> None:
         ''' close XDMF Files '''

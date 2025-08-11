@@ -50,6 +50,8 @@ class Problem(LoggerBase):
         self.u0 = None
         self.w = None
         
+        self.is_wk_implicit = False
+
         self.eigen_matrices = None
 
         # eigen problem setup
@@ -306,6 +308,7 @@ class Problem(LoggerBase):
                 self.forms['mapdd_rhs'] += elem['rhs']
         
         if self._using_wk:
+            self.is_wk_implicit = self.options['wk']['is_implicit']
             ds = self.ds
             n = FacetNormal(self.mesh)
             t_p = grad(p) - dot(grad(p),n)*n
@@ -315,6 +318,10 @@ class Problem(LoggerBase):
                 const = rho*k*elem['eps']
                 self.forms['conv'] += const*inner(t_p, t_q)*ds(bid)
                 self.forms['windkessel'] += elem['Pl']*dot(v,n)*ds(bid)
+                if self.is_wk_implicit:
+                    print(bid)
+                    self.forms['conv'] += dot(u,n)*ds(bid)
+
         
         forms_stab = self.stabilization(u_conv)
 
@@ -732,6 +739,7 @@ class BoundaryConditions(LoggerBase):
         alpha = R_d*C/(R_d*C + dt)
         beta = R_d*(1 - alpha)
         gamma = R_p + beta
+        delta = gamma + L/dt
         
         pi0 = bc['parameters']['p0']
         P0 = alpha*pi0
@@ -746,7 +754,8 @@ class BoundaryConditions(LoggerBase):
             'pi': Constant(pi),
             'pi0': Constant(pi0),
             'Q0': Constant(0),
-            'Pl': Constant(P0)
+            'Pl': Constant(P0),
+            'delta': Constant(delta),
         }
 
 
