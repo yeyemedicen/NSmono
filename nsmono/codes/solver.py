@@ -247,9 +247,8 @@ class Solver(LoggerBase):
 
         self.logger.info('Solving the eigenvalue problem...')
 
-        nmode = 3
-        nmode_tot = 40
-
+        nmode_tot = self.options['fluid']['eigenproblem']['number_of_functions']
+        self.logger.info('Solving for {} number of functions'.format(nmode_tot))
         
         velbcs = []
 
@@ -884,7 +883,11 @@ class Solver(LoggerBase):
         if is_eigenproblem:
             pass
         else:
-            A = self.mat['conv']
+            if self.is_wk_implicit:
+                A = PETScMatrix()
+            else:
+                A = self.mat['conv']
+
             assemble(self.forms['conv'], tensor=A)
 
             A.axpy(1, self.mat['mass'], True)
@@ -897,6 +900,8 @@ class Solver(LoggerBase):
                 self.mat['rhs'].axpy(1., self.mat['mass'], True)
 
             [bc.apply(A) for bc in self.bc_dict['dirichlet']]
+
+
 
 
         return A
@@ -946,13 +951,20 @@ class Solver(LoggerBase):
             self.solve_windkessel()
 
         A = self.assemble_NS()
+
         #self.solver_u_ten.set_operator(A)
 
         b = self.build_rhs()
+ 
+        if self._using_wk:
+            if self.is_wk_implicit:
+                self.compute_non_local_wk(A)
+                self.solver_ns.solve(self.w.vector(), b)
+            else:
+                self.solver_ns.solve(self.w.vector(), b, A)
+        else:
+            self.solver_ns.solve(self.w.vector(), b, A)
 
-        self.solver_ns.solve(A, self.w.vector(), b)
-        #self.solver_ns.solve(self.w.vector(), b)
-        
 
         if self.solver_ns.conv_reason < 0:
             self.logger.error('Solver DIVERGED ({})'.
@@ -980,6 +992,85 @@ class Solver(LoggerBase):
                 waveform = self.bc_dict['inflow'][key]['waveform']
                 waveform.t = float(self.t)
 
+    def compute_non_local_wk(self, A):
+
+        ds = Measure('ds', domain=self.w.function_space().mesh(),
+                        subdomain_data=self.bnds)
+        n = FacetNormal(self.w.function_space().mesh())
+
+        phi = TestFunction(self.w.function_space())
+        v, q = split(phi)
+
+
+        #A_petsc = as_backend_type(A).mat()
+        A_petsc = A.mat()
+        
+        #N = A_petsc.getSize()[0]  # global size
+        #A_petsc.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
+
+        comm = self.w.function_space().mesh().mpi_comm()
+        m = len(self.bc_dict['windkessel'].items())  # number of outlets
+
+        r0, r1 = A_petsc.getOwnershipRange()
+        #nloc = r1 - r0  # local rows owned by this rank
+
+        dofmap = self.w.function_space().dofmap()
+        # Local, global
+        sizes = [
+            dofmap.index_map().size(IndexMap.MapSize.OWNED),
+            dofmap.index_map().size(IndexMap.MapSize.GLOBAL),
+        ]
+
+        U_all = PETSc.Mat().createDense(size=(sizes, (m, m)), comm=comm)
+        V_all = PETSc.Mat().createDense(size=(sizes, (m, m)), comm=comm)
+        U_all.setUp(); V_all.setUp()
+
+        #rows_local = np.arange(nloc, dtype=np.int32)
+        rows_global = np.arange(r0, r1, dtype=np.int32)
+
+
+        for j, (bid, prm) in enumerate(self.bc_dict['windkessel'].items()):
+            if False:
+                # This solution only works on serial and it is slow
+                # --- Step 1: Compute surface coupling vector ---
+                b_surf = assemble(dot(v, n) * ds(bid))
+                
+                #b_local = b_surf.get_local()
+                # Convert to PETSc Vec
+                b_surf_petsc = as_backend_type(b_surf).vec()
+                # Extract indices where b_local != 0 (only boundary velocity dofs)
+                nz_idx_64 = np.nonzero(b_local)[0]
+                if len(nz_idx_64) == 0:
+                    continue
+                # Build local outer product just for these dofs
+                nz_idx = nz_idx_64.astype(np.int32)
+                b_nz = b_local[nz_idx]
+                block_outer = float(prm['delta']) * np.outer(b_nz, b_nz)
+
+                # Insert directly into PETSc matrix at the sparse locations
+                A_petsc.setValues(nz_idx, nz_idx, block_outer, PETSc.InsertMode.ADD_VALUES)
+            else:
+                b_vec = PETScVector()
+                assemble(dot(v, n) * ds(bid), tensor=b_vec)
+                b_petsc = as_backend_type(b_vec).vec()
+
+                # Fill only the locally owned rows in column j (parallel-safe)
+                r0, r1 = b_petsc.getOwnershipRange()            # global row range owned by this rank
+                
+                b_loc = b_petsc.getArray(readonly=True)       # local segment (length r1-r0)
+                scl = float(prm['delta'])**0.5
+
+                U_all.setValues(rows_global, [j], scl * b_loc)
+                V_all.setValues(rows_global, [j], scl * b_loc)
+
+        # Assemble U and V after all columns are set
+        U_all.assemblyBegin(); U_all.assemblyEnd()
+        V_all.assemblyBegin(); V_all.assemblyEnd()
+
+        A_extra = PETSc.Mat().createLRC(A_petsc, U_all, None, V_all)
+        
+        self.solver_ns.set_operator(A_extra, A_petsc)
+
     def solve_windkessel(self):
         ''' Solve windkessel
         '''
@@ -1004,13 +1095,11 @@ class Solver(LoggerBase):
             eta = -L/dt
 
             if self.is_wk_implicit:
-                #Q = assemble(dot(self.w.sub(0),n)*ds(bid))
                 Q0 = assemble(dot(self.u0,n)*ds(bid))
-
                 pi0 = float(prm['pi0'])
                 pi = float(prm['pi'])
                 Q0 = float(prm['Q0'])
-                pi_upd = alpha*pi0 #+ beta*Q
+                pi_upd = alpha*pi0
                 Pl_upd = alpha*pi0 + eta*Q0
 
                 self.pi_functions[bid].append(pi)
@@ -1370,7 +1459,7 @@ class PETScSolver(LoggerBase):
         self.timing['pc'] = t0.stop()
         self.ksp.getPC().setReusePreconditioner(self._reuse_Pmat)
 
-    def solve(self, A, x, b):
+    def solve(self, x, b, A=None):
         ''' Wrap PETSc and "inbuilt" FEniCS solvers.
 
         Args:
@@ -1378,22 +1467,29 @@ class PETScSolver(LoggerBase):
             x   PETScVector
             b   PETScVector
         '''
-        if self._use_petsc():
-            self.solve_ksp(A, x, b)
-        else:
-            if self._is_eigenproblem:
-                pass
-            
-                #self.eigensolver = SLEPcEigenSolver(A)
-                #self.eigensolver.parameters["solver"] = "krylov-schur"
-                #self.eigensolver.parameters["spectrum"] = "smallest magnitude"
-                #self.eigensolver.parameters["spectrum"] = "largest real"
-                #self.logger.info('Computing eigenvalues. This could take some time ...')
-                #self.eigensolver.solve(5)
+        
+        if A:
+            if self._use_petsc():
+                #self.solve_ksp(as_backend_type(b).vec(), as_backend_type(x).vec(), A)
+                self.solve_ksp(x, b, A)
+        
             else:
-                solve(A, x, b, self.options_global['linear_solver']['method'])
+                if self._is_eigenproblem:
+                    pass
+                
+                    #self.eigensolver = SLEPcEigenSolver(A)
+                    #self.eigensolver.parameters["solver"] = "krylov-schur"
+                    #self.eigensolver.parameters["spectrum"] = "smallest magnitude"
+                    #self.eigensolver.parameters["spectrum"] = "largest real"
+                    #self.logger.info('Computing eigenvalues. This could take some time ...')
+                    #self.eigensolver.solve(5)
+                else:
+                    solve(A, x, b, self.options_global['linear_solver']['method'])
+        
+        else:
+            self.solve_ksp(x, b)
 
-    def solve_ksp(self, A, x, b):
+    def solve_ksp(self, x, b , A = None):
         ''' Solve the system Ax = b.
             1. Decide which operators have to be set (A or (A, P))
             2. setUp
@@ -1401,18 +1497,19 @@ class PETScSolver(LoggerBase):
             4. clear settings
         '''
         self.logger.debug('KSP: Setting up')
-        if self.fstype in ('ADD', 'MULT'):
-            # or just keep it constant?
-            self._assemble_Pmat()
-            self.ksp.setOperators(A.mat(), self.P.mat())
-        else:
-            self.ksp.setOperators(as_backend_type(A).mat())
+
+        if A:
+            if self.fstype in ('ADD', 'MULT'):
+                # or just keep it constant?
+                self._assemble_Pmat()
+                self.ksp.setOperators(A.mat(), self.P.mat())
+            else:
+                self.ksp.setOperators(as_backend_type(A).mat())
+
 
         self.ksp.setConvergenceHistory()
         self.ksp.setUp()
-
         # self._mg_levels_setup()
-
         self.logger.debug('KSP: Solving Ax=b')
         t0 = Timer('PETScSolver SOLVE ')
         self.ksp.solve(as_backend_type(b).vec(), as_backend_type(x).vec())
@@ -1428,6 +1525,28 @@ class PETScSolver(LoggerBase):
                              '{res}'.format(c=convstr, cr=self.conv_reason,
                                             it=self.iterations,
                                             res=self.residuals[-1]))
+
+    def set_operator(self, A, Ap=None):
+        ''' Set operator A of linear problem Ax = b and set-up solver and
+        preconditioner matrix Ap.
+        Args:
+            A:       dolfin Matrix or PETSc.Mat matrix
+            Ap:      precondition matrix, dolfin Matrix or PETSc.Mat matrix
+        '''
+        if isinstance(A, (Matrix, PETScMatrix)):
+            A = as_backend_type(A).mat()
+
+        elif isinstance(A, PETSc.Mat):
+            pass
+
+        else:
+            raise Exception(f"Unknown matrix type: {type(A)}")
+
+        if isinstance(Ap, (Matrix, PETScMatrix)):
+            Ap = as_backend_type(Ap).mat()
+
+        self.ksp.setOperators(A, Ap)
+        self.ksp.setUp()
 
     def _set_fieldsplit_IS(self, ksp=None):
         ''' Sets and returns index fields for field split. For unstabilized

@@ -318,11 +318,8 @@ class Problem(LoggerBase):
                 const = rho*k*elem['eps']
                 self.forms['conv'] += const*inner(t_p, t_q)*ds(bid)
                 self.forms['windkessel'] += elem['Pl']*dot(v,n)*ds(bid)
-                if self.is_wk_implicit:
-                    print(bid)
-                    self.forms['conv'] += dot(u,n)*ds(bid)
 
-        
+
         forms_stab = self.stabilization(u_conv)
 
         if 'bfs' in forms_stab:
@@ -755,7 +752,7 @@ class BoundaryConditions(LoggerBase):
             'pi0': Constant(pi0),
             'Q0': Constant(0),
             'Pl': Constant(P0),
-            'delta': Constant(delta),
+            'delta': delta,
         }
 
 
