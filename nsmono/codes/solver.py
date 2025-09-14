@@ -473,7 +473,7 @@ class Solver(LoggerBase):
         if restart:
             self.restart_timestep(state, parameters)
 
-        self.solve_NS()
+        self.solve_NS(i)
 
         if state:
             self.update_state(state)
@@ -939,7 +939,7 @@ class Solver(LoggerBase):
 
         return b
 
-    def solve_NS(self):
+    def solve_NS(self,i):
         ''' Solve tentative velocity PDE '''
 
         self.logger.info('Solve NS monolithic')
@@ -958,7 +958,8 @@ class Solver(LoggerBase):
  
         if self._using_wk:
             if self.is_wk_implicit:
-                self.compute_non_local_wk(A)
+                if i == 1:
+                    self.compute_non_local_wk(A)
                 self.solver_ns.solve(self.w.vector(), b)
             else:
                 self.solver_ns.solve(self.w.vector(), b, A)
@@ -1022,8 +1023,7 @@ class Solver(LoggerBase):
         ]
 
         U_all = PETSc.Mat().createDense(size=(sizes, (m, m)), comm=comm)
-        V_all = PETSc.Mat().createDense(size=(sizes, (m, m)), comm=comm)
-        U_all.setUp(); V_all.setUp()
+        U_all.setUp()
 
         #rows_local = np.arange(nloc, dtype=np.int32)
         rows_global = np.arange(r0, r1, dtype=np.int32)
@@ -1061,13 +1061,11 @@ class Solver(LoggerBase):
                 scl = float(prm['delta'])**0.5
 
                 U_all.setValues(rows_global, [j], scl * b_loc)
-                V_all.setValues(rows_global, [j], scl * b_loc)
 
-        # Assemble U and V after all columns are set
+        # Assemble U after all columns are set
         U_all.assemblyBegin(); U_all.assemblyEnd()
-        V_all.assemblyBegin(); V_all.assemblyEnd()
 
-        A_extra = PETSc.Mat().createLRC(A_petsc, U_all, None, V_all)
+        A_extra = PETSc.Mat().createLRC(A_petsc, U_all, None, U_all)
         
         self.solver_ns.set_operator(A_extra, A_petsc)
 
