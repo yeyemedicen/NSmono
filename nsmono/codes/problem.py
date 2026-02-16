@@ -382,6 +382,15 @@ class Problem(LoggerBase):
             #grada = div(v)*p*dx
             #diva = q*div(u)*dx
             aa_tot = -mu*inner(grad(u), grad(v))*dx + div(v)*p*dx + q*div(u)*dx
+            
+            #n = FacetNormal(self.mesh)
+            #ds = self.ds
+            #gamma = 1e+5
+            #def tangential(w):
+            #    return w - dot(w, n)*n
+            #ut = tangential(u)
+            #vt = tangential(v)
+            #aa_tot += gamma * inner(ut, vt) * ds(2)
 
 
         L_eigen = None

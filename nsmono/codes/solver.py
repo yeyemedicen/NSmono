@@ -57,6 +57,7 @@ class Solver(LoggerBase):
         self._is_eigen_cube = problem._is_eigen_cube
         self._is_laplace = problem._is_laplace
         self.is_wk_implicit = problem.is_wk_implicit
+        self.general_problem = problem
 
         if self._is_eigenproblem:
             self.W = problem.W
@@ -68,7 +69,6 @@ class Solver(LoggerBase):
 
         mesh = self.w.function_space().mesh()
         
-
         # for stokes-like solutions and stokes eigen values
         self.uwrite = Function(self.w.function_space().sub(0).collapse())
         self.pwrite = Function(self.w.function_space().sub(1).collapse())
@@ -173,9 +173,9 @@ class Solver(LoggerBase):
         self.residuals_ksp = {}
 
         if self._is_eigenproblem:
-            self.solver_ns  = PETScSolver(self.options, self._logging_filehandler, is_eigen=True)
+            self.solver_ns  = PETScSolver(self.options , self.general_problem, self._logging_filehandler, is_eigen=True)
         else:
-            self.solver_ns  = PETScSolver(self.options, self._logging_filehandler)
+            self.solver_ns  = PETScSolver(self.options, self.general_problem, self._logging_filehandler)
 
         self.iterations_ksp.update({'monolithic': []})
         self.residuals_ksp.update({'monolithic': []})
@@ -187,7 +187,7 @@ class Solver(LoggerBase):
             self.logger.info('Writing initial condition')
 
         self.write_xdmf(t=0.)
-        self.write_checkpoint(0)
+        self.write_checkpoint2(0)
 
     def solve(self):
         ''' Solve fractional step scheme '''
@@ -364,7 +364,9 @@ class Solver(LoggerBase):
                 Mc = Mc[row_maskM][:, col_maskM]
                 ValEig = nmode_tot
                 sigmashift = 0 #Garding shift
-                E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM')
+                #E1, V1=eigsh(Ac_tot, ValEig, Mc, sigmashift,'LM')
+                E1, V1 = eigsh(Ac_tot, k=ValEig, M=Mc, which="SM")  # may converge slower
+
                 ind=np.argsort(E1)[::-1] #Sort descending
                 ind = ind=np.argsort(E1)
                 E1 = E1[ind]
@@ -1184,7 +1186,7 @@ class Solver(LoggerBase):
 
                 self._t_checkpt = self.t
                 writeout += 2
-                self.write_checkpoint(i)
+                self.write_checkpoint2(i)
 
         self._writeout = writeout
 
@@ -1317,17 +1319,68 @@ class Solver(LoggerBase):
         #assign(self.uwrite, self.w.sub(0))
         #assign(self.pwrite, self.w.sub(1))
 
-
         (u, p) = self.w.split()
+        u.rename('u', 'velocity')
+        p.rename('p', 'pressure')
+
+        uvec = u.vector().get_local()
+        imax = uvec.argmax()
+        print("BEFORE WRITE: u max =", uvec[imax], "at local dof", imax)
+
         #u, p = self.w.split()
-        
         #assign(self.uwrite, u)
         #assign(self.pwrite, p)
-        LagrangeInterpolator.interpolate(self.uwrite,u)
-        LagrangeInterpolator.interpolate(self.pwrite,p)
+        #LagrangeInterpolator.interpolate(self.uwrite,u)
+        #LagrangeInterpolator.interpolate(self.pwrite,p)
 
-        inout.write_HDF5_data(comm, path + '/u.h5', self.uwrite, '/u',t=self.t)
-        inout.write_HDF5_data(comm, path + '/p.h5', self.pwrite, '/p', t=self.t)
+
+        inout.write_HDF5_data(comm, path + '/u.h5', u, '/u',t=self.t)
+        inout.write_HDF5_data(comm, path + '/p.h5', p, '/p', t=self.t)
+
+
+        W = self.w.function_space()
+        u_read = Function(W.sub(0).collapse())  # see note below
+        # OR better: read whole mixed (see section 3)
+
+        with HDF5File(comm, path + "/u.h5", "r") as hdf:
+            hdf.read(u_read, "/u")
+
+        uvec2 = u_read.vector().get_local()
+        imax2 = uvec2.argmax()
+        print("AFTER READ:  u max =", uvec2[imax2], "at local dof", imax2)
+
+    def write_checkpoint2(self, i):
+        ''' Write HDF5 checkpoint of u, p to <write_path>/checkpoints folder.
+
+        Args:
+            i       (int)  iteration count
+            update  (bool) specifies which velocity to store (in ALE)
+        '''
+        if not self.options['io']['write_checkpoints']:
+            return
+
+        path = (self.options['io']['write_path']
+                + '/checkpoint/{i}/'.format(i=i))
+
+
+        comm = self.w.function_space().mesh().mpi_comm()
+        self.w.vector().apply("insert")  # safe if you did custom PETSc ops
+
+        with HDF5File(comm, path + "/w.h5", "w") as hdf:
+            hdf.write(self.w, "/w", float(self.t))
+        
+        #u_write, p_write = self.w.split(True)  # deepcopy=True
+        #uvec = u_write.vector().get_local()
+        #imax = uvec.argmax()
+        #print("BEFORE WRITE: u max =", uvec[imax], "at local dof", imax)
+        #W = self.w.function_space()
+        #w_read = Function(W)
+        #with HDF5File(comm, path + "/w.h5", "r") as hdf:
+        #    hdf.read(w_read, "/w")
+        #u_read, p_read = w_read.split(True)  # deepcopy=True
+        #uvec = u_read.vector().get_local()
+        #imax = uvec.argmax()
+        #print("AFTER WRITE: u max =", uvec[imax], "at local dof", imax)
 
     def close_xdmf(self) -> None:
         ''' close XDMF Files '''
@@ -1369,7 +1422,7 @@ class PETScSolver(LoggerBase):
     ''' Solver class that handles preconditioned Krylov solvers
     '''
 
-    def __init__(self, options, logging_fh=None, is_eigen = False):
+    def __init__(self, options, problem, logging_fh=None, is_eigen = False):
         super().__init__()
 
         self._is_eigenproblem = is_eigen
@@ -1387,6 +1440,7 @@ class PETScSolver(LoggerBase):
         self.iterations = None
         self.conv_reason = 0
         self.timing = {'ksp': 0, 'pc': 0}
+        self.generalproblem = problem
 
         if self._use_petsc():
             self.logger.info('Initializing PETSc Krylov solver')
