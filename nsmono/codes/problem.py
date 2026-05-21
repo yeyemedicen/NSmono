@@ -6,7 +6,6 @@ Written by Jeremias Garay L: j.e.garay.labra@rug.nl
 '''
 
 from dolfin import *
-from common import inout
 from dolfin import MPI
 from pathlib import Path
 from numpy import poly1d, polyfit, array
@@ -170,7 +169,8 @@ class Problem(LoggerBase):
 
         else:
             self.mesh, self.subdomains, self.bnds = \
-                inout.read_mesh(self.options['mesh'])
+                inout.read_mesh_old(self.options['mesh'])
+            
             self.ndim = self.mesh.topology().dim()
 
     def create_functionspaces(self):
@@ -555,7 +555,13 @@ class BoundaryConditions(LoggerBase):
         self.w = problem.w
         self.ndim = self.W.mesh().topology().dim()
         self.ds = Measure('ds', domain=self.W.mesh(), subdomain_data=self.bnds)
-
+        
+        #mesh, sd, bnd = inout.read_mesh_old(self.options['mesh'])
+        #print("mesh dim:", mesh.topology().dim())   # must be 2, not 1
+        #print("ds total:", assemble(Constant(1)*Measure('ds', domain=mesh, subdomain_data=bnd)))
+        #print("ds(2):   ", assemble(Constant(1)*Measure('ds', domain=mesh,subdomain_data=bnd)(2)))
+        
+        
         self._using_wk = False
         self._using_mapdd = False
 
@@ -632,9 +638,13 @@ class BoundaryConditions(LoggerBase):
         nid = bc['id']
         n = FacetNormal(self.W.mesh())
         gamma = bc['gamma']
-        uprofile = Function(self.W.sub(0).collapse())
-        inout.read_HDF5_data(self.W.mesh().mpi_comm(), bc['profile'], uprofile, 'u')
+        wprofile = Function(self.W)
         
+        with HDF5File(self.W.mesh().mpi_comm(), bc['profile'], "r") as hdf:
+            hdf.read(wprofile, "/w")
+
+        uprofile, pprofile = wprofile.split(True)  # deepcopy=True
+
         if '.csv' in bc['waveform']:
             self.logger.info('taking flow form csv file')
             flow_init = assemble(dot(uprofile,n)*ds(nid))
